@@ -30,26 +30,20 @@ async function initCropScreen() {
     {x: cropImgOffX + iw*(1-inset), y: cropImgOffY + ih*(1-inset)},
     {x: cropImgOffX + iw*inset,     y: cropImgOffY + ih*(1-inset)},
   ];
-  drawCrop(true); // draw with "detecting…" overlay
+  drawCrop();
 
-  // Try OpenCV first
-  let detected = null;
-  try {
-    detected = await detectCardWithCV(img);
-  } catch (e) {
-    console.warn('OpenCV detection failed, falling back:', e);
-  }
-  // Fallback to brightness heuristic
-  if (!detected) {
-    detected = detectCardCorners(img);
-  }
+  // Run the cheap brightness heuristic synchronously to pre-place the corners.
+  // We deliberately don't run OpenCV here — its WASM compile (~10MB) blocked
+  // the main thread enough that Chrome popped a "page not responding" dialog.
+  // The user can click "Auto-detect corners" to opt into the heavier CV pass.
+  const detected = detectCardCorners(img);
   if (detected) {
     state.corners = detected.map(p => ({
       x: cropImgOffX + p.x * sc,
       y: cropImgOffY + p.y * sc,
     }));
+    drawCrop();
   }
-  drawCrop();
 }
 
 // ─────── OpenCV.js based card detection ───────
