@@ -93,10 +93,13 @@ function classifyPose(quad) {
   return ty > 0 ? 'down' : 'up';
 }
 
-// Are brightness / sharpness / framing all "good enough" to consider capturing?
+// Are quad + light + framing all "good enough" to consider capturing?
+// Sharpness is NOT a gate — it would block forever on phones whose normal
+// handheld blur sits below the threshold. Instead we use it as a tiebreaker
+// inside maybeRecordPoseFrame(): the sharpest frame seen for each pose wins.
 function isQualityGood() {
   const q = scanner.lastQuality;
-  return q.detect >= 0.99 && q.sharp >= 0.45 && q.light >= 0.35 && q.frame >= 0.55;
+  return q.detect >= 0.99 && q.light >= 0.35 && q.frame >= 0.55;
 }
 
 // If the current frame is good and improves over what we have for this pose, store it.
@@ -553,8 +556,6 @@ function updateInstruction() {
     msg = 'Halt eine Karte ins Bild';
   } else if (q.light < 0.35) {
     msg = 'Mehr Licht bitte';
-  } else if (q.sharp < 0.45) {
-    msg = 'Ruhig halten · scharfstellen';
   } else if (q.frame < 0.55) {
     if (q.coverage < 0.25) msg = 'Näher ran';
     else if (q.coverage > 0.85) msg = 'Etwas weiter weg';
@@ -591,40 +592,8 @@ function updateAutoCapture(_dt) {
   maybeRecordPoseFrame();
 }
 
-// Manual single-shot fallback (Capture-now button): just snap whatever we have
-// right now and use it as the center frame, even if not all poses are filled.
-function manualCapture() {
-  if (captureState.finished) return;
-  const q = scanner.lastQuality;
-  if (!q.quad) {
-    alert('Keine Karte erkannt — bitte ins Bild halten.');
-    return;
-  }
-  const c = document.createElement('canvas');
-  c.width = scanVideo.videoWidth;
-  c.height = scanVideo.videoHeight;
-  c.getContext('2d').drawImage(scanVideo, 0, 0);
-  const qs = q.quadScale;
-  const imgQuad = q.quad.map(p => ({ x: p.x * qs, y: p.y * qs }));
-  captureState.perPose.center = captureState.perPose.center || { sharpness: q.sharpness, frame: c, imgQuad };
-  // Force-finish: rectify center, jump to analysis
-  captureState.finished = true;
-  state.sourceImage = c;
-  state.rectifiedCanvas = rectifyFromImageCorners(c, imgQuad);
-  stopScan(true);
-  unlockScreen('analysis');
-  showScreen('analysis');
-  startAnalysis();
-  setTimeout(() => {
-    scanStage.style.display = 'none';
-    scanWelcome.style.display = 'block';
-    resetCaptureState();
-    updatePoseUI();
-  }, 600);
-}
-
-// Legacy single-shot path — kept so the Crop screen still has a way in via
-// "Load demo card", but no longer used by the live scanner.
+// Legacy single-shot path — only reached now via "Load demo card" through
+// captureFrameNow → crop screen. Not used by the live scanner anymore.
 function captureFrameNow() {
   // Snap full-resolution frame to an Image
   const c = document.createElement('canvas');
@@ -655,7 +624,6 @@ document.getElementById('btnStartScan').addEventListener('click', () => {
   startScan();
 });
 document.getElementById('btnCancelScan').addEventListener('click', () => stopScan(false));
-document.getElementById('btnManualCapture').addEventListener('click', manualCapture);
 
 function loadImage(file) {
   // Kept for backwards compat (e.g. demo card path), but no file-picker UI anymore

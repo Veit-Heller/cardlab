@@ -437,7 +437,7 @@ main {
   transition: stroke-dashoffset 0.2s linear;
 }
 
-/* Bottom controls */
+/* Bottom controls — only the Cancel button now */
 .scan-controls {
   position: absolute;
   bottom: 16px;
@@ -445,7 +445,7 @@ main {
   right: 16px;
   z-index: 6;
   display: flex;
-  justify-content: space-between;
+  justify-content: flex-end;
   align-items: center;
 }
 .scan-control-btn {
