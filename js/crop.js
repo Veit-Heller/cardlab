@@ -60,11 +60,11 @@ async function initCropScreen() {
 //   4. For each contour: approxPolyDP, keep those with 4 vertices & convex
 //   5. Choose the largest one with reasonable aspect ratio (card-like)
 //   6. Sort the 4 vertices as TL, TR, BR, BL
-async function detectCardWithCV(img, timeoutMs = 6000) {
+async function detectCardWithCV(img, timeoutMs = 8000) {
   let cv;
   try {
     cv = await Promise.race([
-      window.cvReady,
+      loadOpenCV(),
       new Promise((_, rej) => setTimeout(() => rej(new Error('cv timeout')), timeoutMs)),
     ]);
   } catch (e) {

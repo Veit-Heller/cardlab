@@ -40,9 +40,11 @@ async function startScan() {
   } catch (err) {
     alert('Camera access denied or unavailable.\n\n' + err.message +
           '\n\nMake sure you are on https:// or localhost.');
-    stopScan(true);
+    stopScan(false); // reset UI back to welcome on permission/error
     return;
   }
+  // Camera up — kick off OpenCV in the background so detection engages once ready.
+  loadOpenCV().catch(e => console.warn('OpenCV failed to load:', e));
   scanVideo.srcObject = scanner.stream;
   await scanVideo.play().catch(() => {});
 

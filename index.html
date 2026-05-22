@@ -9,14 +9,22 @@
 <link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:ital,wght@0,400;0,500;0,600;0,700;1,400&family=JetBrains+Mono:wght@300;400;500;700&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="styles/main.css">
 <script>
-  // OpenCV.js loading state. We expose a promise that other code can await.
-  window.cvReady = new Promise((resolve) => {
-    window.Module = {
-      onRuntimeInitialized() { resolve(window.cv); }
-    };
-  });
+  // OpenCV.js is ~10MB WASM; eager-loading blocked the main thread on slow
+  // connections so the welcome page felt frozen. We lazy-load on first call.
+  let cvLoadPromise = null;
+  function loadOpenCV() {
+    if (cvLoadPromise) return cvLoadPromise;
+    cvLoadPromise = new Promise((resolve, reject) => {
+      window.Module = { onRuntimeInitialized() { resolve(window.cv); } };
+      const s = document.createElement('script');
+      s.src = 'https://docs.opencv.org/4.10.0/opencv.js';
+      s.async = true;
+      s.onerror = () => reject(new Error('failed to load opencv.js'));
+      document.head.appendChild(s);
+    });
+    return cvLoadPromise;
+  }
 </script>
-<script async src="https://docs.opencv.org/4.10.0/opencv.js"></script>
 </head>
 <body>
 
