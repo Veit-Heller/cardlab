@@ -1,0 +1,238 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<title>CardLab — Inspect & Showcase</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:ital,wght@0,400;0,500;0,600;0,700;1,400&family=JetBrains+Mono:wght@300;400;500;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="styles/main.css">
+<script>
+  // OpenCV.js loading state. We expose a promise that other code can await.
+  window.cvReady = new Promise((resolve) => {
+    window.Module = {
+      onRuntimeInitialized() { resolve(window.cv); }
+    };
+  });
+</script>
+<script async src="https://docs.opencv.org/4.10.0/opencv.js"></script>
+</head>
+<body>
+
+<header>
+  <div class="logo">CardLab <em>·</em> <span style="font-family:var(--mono);font-size:10px;letter-spacing:0.25em;color:var(--ink-dim);text-transform:uppercase;align-self:center;">Inspect &amp; Showcase</span></div>
+  <nav>
+    <button class="nav-btn active" data-screen="capture">01 · Capture</button>
+    <button class="nav-btn" data-screen="crop" disabled>02 · Adjust</button>
+    <button class="nav-btn" data-screen="analysis" disabled>03 · Analyze</button>
+    <button class="nav-btn" data-screen="showcase" disabled>04 · Showcase</button>
+  </nav>
+</header>
+
+<main>
+
+  <!-- ═════════ SCREEN 1: LIVE SCAN ═════════ -->
+  <section class="screen active" id="screen-capture">
+    <!-- Welcome state (pre-camera) -->
+    <div id="scanWelcome">
+      <div class="capture-hero">
+        <h1>Inspect your <em>cards</em>.</h1>
+        <h1 style="margin-top:8px;">Showcase them in <em>holo</em>.</h1>
+        <div class="tagline">A laboratory for collectors</div>
+      </div>
+      <div style="text-align:center;margin-top:36px;">
+        <button class="action-btn primary" id="btnStartScan">
+          <span class="icon">◉</span>
+          <span>Start scanning</span>
+        </button>
+      </div>
+      <div class="demo-row">
+        <span style="align-self:center;">No camera?</span>
+        <button id="loadDemo">Load demo card</button>
+      </div>
+      <p style="text-align:center;font-family:var(--mono);font-size:10px;letter-spacing:0.18em;text-transform:uppercase;color:var(--ink-dim);margin-top:30px;opacity:0.7;">
+        Camera access requires https:// or localhost
+      </p>
+    </div>
+
+    <!-- Live scanner state -->
+    <div id="scanStage" style="display:none;">
+      <div class="scanner-wrap">
+        <video id="scanVideo" playsinline muted autoplay></video>
+        <canvas id="scanOverlay"></canvas>
+
+        <!-- Card frame guide -->
+        <div class="card-guide">
+          <div class="card-guide-frame">
+            <div class="card-guide-corner tl"></div>
+            <div class="card-guide-corner tr"></div>
+            <div class="card-guide-corner br"></div>
+            <div class="card-guide-corner bl"></div>
+          </div>
+        </div>
+
+        <!-- Instruction text -->
+        <div class="scan-instruction" id="scanInstruction">
+          Hold a card inside the frame
+        </div>
+
+        <!-- Quality bars HUD -->
+        <div class="scan-hud">
+          <div class="hud-bar" data-key="detect">
+            <span class="hud-label">Detect</span>
+            <div class="hud-bar-track"><div class="hud-bar-fill"></div></div>
+          </div>
+          <div class="hud-bar" data-key="sharp">
+            <span class="hud-label">Sharpness</span>
+            <div class="hud-bar-track"><div class="hud-bar-fill"></div></div>
+          </div>
+          <div class="hud-bar" data-key="light">
+            <span class="hud-label">Light</span>
+            <div class="hud-bar-track"><div class="hud-bar-fill"></div></div>
+          </div>
+          <div class="hud-bar" data-key="frame">
+            <span class="hud-label">Framing</span>
+            <div class="hud-bar-track"><div class="hud-bar-fill"></div></div>
+          </div>
+        </div>
+
+        <!-- Capture progress ring -->
+        <div class="capture-ring" id="captureRing">
+          <svg viewBox="0 0 100 100">
+            <circle cx="50" cy="50" r="46" class="ring-bg"></circle>
+            <circle cx="50" cy="50" r="46" class="ring-fill" id="ringFill"></circle>
+          </svg>
+        </div>
+
+        <!-- Bottom controls -->
+        <div class="scan-controls">
+          <button class="scan-control-btn" id="btnCancelScan">Cancel</button>
+          <button class="scan-control-btn primary" id="btnManualCapture">⬤ Capture now</button>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ═════════ SCREEN 2: CROP / ADJUST ═════════ -->
+  <section class="screen" id="screen-crop">
+    <div class="crop-wrap">
+      <div class="crop-canvas-wrap">
+        <canvas id="cropCanvas"></canvas>
+      </div>
+      <div class="crop-side">
+        <h2>Frame the <em>card</em>.</h2>
+        <p>Drag the four corners to align with the card's edges. We'll rectify the perspective and analyze the surface.</p>
+        <button class="btn-primary" id="confirmCrop">Continue to Analysis →</button>
+        <button class="btn-secondary" id="autoCorners">Auto-detect corners</button>
+        <button class="btn-secondary" id="backToCapture">← Use a different photo</button>
+      </div>
+    </div>
+  </section>
+
+  <!-- ═════════ SCREEN 3: ANALYSIS ═════════ -->
+  <section class="screen" id="screen-analysis">
+    <div class="analysis-wrap">
+      <div>
+        <div class="analysis-canvas-wrap">
+          <canvas id="analysisCanvas"></canvas>
+          <canvas id="overlayCanvas"></canvas>
+          <div class="scan-line" id="scanLine"></div>
+        </div>
+        <div class="loading-text" id="analysisStatus">Initializing scan...</div>
+      </div>
+
+      <div>
+        <div class="panel-title"><em>Inspection</em> report</div>
+        <div class="panel-sub">Tobold's Card Inspector · Build 1.0</div>
+
+        <div class="check-row" id="check-centering">
+          <div class="check-icon">◇</div>
+          <div class="check-info">
+            <div class="check-label">Centering</div>
+            <div class="check-desc">Frame / border ratio</div>
+          </div>
+          <div class="check-value">—</div>
+        </div>
+
+        <div class="check-row" id="check-corners">
+          <div class="check-icon">◇</div>
+          <div class="check-info">
+            <div class="check-label">Corners</div>
+            <div class="check-desc">Whitening · sharpness</div>
+          </div>
+          <div class="check-value">—</div>
+        </div>
+
+        <div class="check-row" id="check-edges">
+          <div class="check-icon">◇</div>
+          <div class="check-info">
+            <div class="check-label">Edges</div>
+            <div class="check-desc">Nicks · chipping</div>
+          </div>
+          <div class="check-value">—</div>
+        </div>
+
+        <div class="check-row" id="check-surface">
+          <div class="check-icon">◇</div>
+          <div class="check-info">
+            <div class="check-label">Surface</div>
+            <div class="check-desc">Print lines · specks</div>
+          </div>
+          <div class="check-value">—</div>
+        </div>
+
+        <div class="final-score" id="finalScore">
+          <div class="label">CardLab Grade</div>
+          <div class="grade-number" id="gradeNumber">—</div>
+          <div class="grade-label" id="gradeLabel">—</div>
+          <div class="disclaimer">Not affiliated with PSA · For collectors' fun only</div>
+          <button class="btn-primary" style="margin-top:24px;" id="toShowcase">View in Showcase →</button>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ═════════ SCREEN 4: HOLO SHOWCASE ═════════ -->
+  <section class="screen" id="screen-showcase">
+    <div class="showcase-stage">
+      <div class="showcase-title">
+        <h2>The <em>holo</em> chamber.</h2>
+        <p>Move your mouse · Tilt your device</p>
+      </div>
+
+      <div class="holo-card float" id="holoCard">
+        <div class="layer card-img" id="holoCardImg"></div>
+        <div class="layer holo-pattern" id="holoPattern"></div>
+        <div class="layer holo-rainbow" id="holoRainbow"></div>
+        <div class="layer holo-sparkle" id="holoSparkle"></div>
+        <div class="layer holo-glare" id="holoGlare"></div>
+        <div class="layer holo-frame"></div>
+      </div>
+
+      <div class="showcase-controls">
+        <button class="holo-style active" data-style="cosmos">Cosmos</button>
+        <button class="holo-style" data-style="rainbow">Rainbow</button>
+        <button class="holo-style" data-style="gold">Gold Crown</button>
+        <button class="holo-style" data-style="subtle">Subtle</button>
+        <button id="enableGyro" style="margin-left:20px;">📱 Enable tilt</button>
+      </div>
+    </div>
+  </section>
+
+</main>
+
+<footer>
+  CardLab · A collector's instrument · v0.1
+</footer>
+
+<!-- Order matters: state must load first; geometry before scan/crop; -->
+<!-- scan defines initCropScreen consumer; analysis defines initShowcase consumer. -->
+<script src="js/state.js"></script>
+<script src="js/geometry.js"></script>
+<script src="js/scan.js"></script>
+<script src="js/crop.js"></script>
+<script src="js/analysis.js"></script>
+<script src="js/showcase.js"></script>
+</body>
+</html>
