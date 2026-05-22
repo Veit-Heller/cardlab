@@ -420,44 +420,45 @@ document.getElementById('confirmCrop').addEventListener('click', () => {
 
 // ─────── Perspective rectification ───────
 // Standard Pokémon card aspect ratio: 2.5 x 3.5 inches = 5:7
-function rectifyCard() {
-  const targetW = 500, targetH = 700;
+
+// Pure rectify, given source image and quad in *image* coordinates.
+// Used both by the Crop screen's "Continue" and by scan.js's multi-angle finish.
+function rectifyFromImageCorners(img, imgCorners, targetW = 500, targetH = 700) {
   const out = document.createElement('canvas');
   out.width = targetW;
   out.height = targetH;
   const octx = out.getContext('2d');
 
-  // Convert canvas-coordinates to image-coordinates
-  const imgCorners = state.corners.map(c => ({
-    x: (c.x - cropImgOffX) / cropImgScale,
-    y: (c.y - cropImgOffY) / cropImgScale,
-  }));
-
-  // We'll use a quad-warp by slicing into a grid and drawing each cell as a triangle.
-  // This is the classic "no-WebGL perspective warp" trick.
-  const N = 40; // grid resolution
+  // Quad-warp by slicing into a grid and drawing each cell as two triangles.
+  // Classic "no-WebGL perspective warp" trick.
+  const N = 40;
   for (let i = 0; i < N; i++) {
     for (let j = 0; j < N; j++) {
       const u0 = i/N, u1 = (i+1)/N;
       const v0 = j/N, v1 = (j+1)/N;
-
-      // Bilinear interpolation of source corners
       const p00 = bilinear(imgCorners, u0, v0);
       const p10 = bilinear(imgCorners, u1, v0);
       const p11 = bilinear(imgCorners, u1, v1);
       const p01 = bilinear(imgCorners, u0, v1);
-
-      // Two triangles per cell
-      drawTriangle(octx, state.sourceImage,
+      drawTriangle(octx, img,
         u0*targetW, v0*targetH, u1*targetW, v0*targetH, u1*targetW, v1*targetH,
         p00.x, p00.y, p10.x, p10.y, p11.x, p11.y);
-      drawTriangle(octx, state.sourceImage,
+      drawTriangle(octx, img,
         u0*targetW, v0*targetH, u1*targetW, v1*targetH, u0*targetW, v1*targetH,
         p00.x, p00.y, p11.x, p11.y, p01.x, p01.y);
     }
   }
+  return out;
+}
 
-  state.rectifiedCanvas = out;
+// Crop-screen adapter: converts the user-dragged canvas corners to image coords
+// and writes state.rectifiedCanvas.
+function rectifyCard() {
+  const imgCorners = state.corners.map(c => ({
+    x: (c.x - cropImgOffX) / cropImgScale,
+    y: (c.y - cropImgOffY) / cropImgScale,
+  }));
+  state.rectifiedCanvas = rectifyFromImageCorners(state.sourceImage, imgCorners);
 }
 
 function bilinear(c, u, v) {

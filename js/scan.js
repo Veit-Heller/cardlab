@@ -16,15 +16,133 @@ const scanner = {
   running: false,
   rafId: null,
   lastDetectAt: 0,
-  detectInterval: 250, // ms → ~4 FPS for cheap stats (brightness/sharpness)
-  lastCvDetectAt: 0,
-  cvDetectInterval: 1500, // ms → OpenCV quad detection (heavy on mobile)
+  detectInterval: 150, // ms — cheap stats (brightness/sharpness) per step
+  lastCvDispatchAt: 0,
+  cvInterval: 250, // ms between OpenCV detect dispatches (Worker, off main thread)
+  cvBusy: false,   // true while a Worker detect is in flight (no overlap)
+  cvSeq: 0,        // monotonic request id
   lastQuality: { detect: 0, sharp: 0, light: 0, frame: 0, quad: null },
-  qualityHistory: [], // ring buffer of recent "all good" booleans
-  readyStreak: 0, // ms accumulated while all bars are good
-  readyTarget: 700, // ms required to auto-capture
+  qualityHistory: [],
+  readyStreak: 0,
+  readyTarget: 700,
   lastFrameTime: 0,
 };
+
+// ─────── OpenCV runs in a Worker ───────
+// Keeps the main thread free for camera + UI even when WASM is busy.
+let cvWorker = null;
+let cvWorkerReady = false;
+function setupCvWorker() {
+  if (cvWorker) return;
+  cvWorker = new Worker('js/cv-worker.js');
+  cvWorker.onmessage = (e) => {
+    const m = e.data;
+    if (m.type === 'ready') {
+      cvWorkerReady = true;
+    } else if (m.type === 'detect-result') {
+      scanner.cvBusy = false;
+      onCvDetectResult(m.id, m.quad);
+    }
+  };
+  cvWorker.onerror = (e) => {
+    console.warn('cv-worker error:', e.message || e);
+    scanner.cvBusy = false;
+  };
+}
+
+// ─────── Multi-angle capture: pose detection + state machine ───────
+// We classify the current card pose from the projected quad and require the
+// user to hold the card in each of 5 poses (center + 4 tilts). The sharpest
+// frame per pose is kept; once all 5 are collected, the center frame is
+// rectified and handed to the analysis screen.
+const POSES = ['center', 'left', 'right', 'up', 'down'];
+const POSE_HINT = {
+  center: 'Halt die Karte gerade vor die Kamera',
+  left:   'Jetzt linke Seite zur Kamera neigen',
+  right:  'Jetzt rechte Seite zur Kamera neigen',
+  up:     'Jetzt obere Kante zur Kamera neigen',
+  down:   'Jetzt untere Kante zur Kamera neigen',
+};
+
+const captureState = {
+  perPose: {}, // pose → { sharpness, frame: Canvas, imgQuad: [{x,y}*4] }
+  finished: false,
+};
+function resetCaptureState() {
+  captureState.perPose = {};
+  captureState.finished = false;
+  POSES.forEach(p => { captureState.perPose[p] = null; });
+}
+resetCaptureState();
+
+// Classify the pose by comparing edge lengths of the detected quad.
+// Returns 'center' | 'left' | 'right' | 'up' | 'down' | null.
+function classifyPose(quad) {
+  if (!quad) return null;
+  const lh = dist(quad[0], quad[3]); // TL-BL  left edge in projection
+  const rh = dist(quad[1], quad[2]); // TR-BR  right edge
+  const tw = dist(quad[0], quad[1]); // TL-TR  top edge
+  const bw = dist(quad[3], quad[2]); // BL-BR  bottom edge
+  // tx > 0 → left edge appears longer than right → card tilted so left side is closer to camera
+  // ty > 0 → bottom edge appears longer than top → card tilted so bottom is closer to camera
+  const tx = (lh - rh) / (lh + rh);
+  const ty = (bw - tw) / (bw + tw);
+  const T = 0.07;
+  if (Math.abs(tx) < T && Math.abs(ty) < T) return 'center';
+  if (Math.abs(tx) > Math.abs(ty)) return tx > 0 ? 'left' : 'right';
+  return ty > 0 ? 'down' : 'up';
+}
+
+// Are brightness / sharpness / framing all "good enough" to consider capturing?
+function isQualityGood() {
+  const q = scanner.lastQuality;
+  return q.detect >= 0.99 && q.sharp >= 0.45 && q.light >= 0.35 && q.frame >= 0.55;
+}
+
+// If the current frame is good and improves over what we have for this pose, store it.
+function maybeRecordPoseFrame() {
+  if (captureState.finished) return;
+  if (!isQualityGood()) return;
+  const pose = classifyPose(scanner.lastQuality.quad);
+  if (!pose) return;
+  const slot = captureState.perPose[pose];
+  const sharp = scanner.lastQuality.sharpness;
+  if (slot && slot.sharpness >= sharp) return; // not better
+  // Snap full-resolution video frame
+  const c = document.createElement('canvas');
+  c.width = scanVideo.videoWidth;
+  c.height = scanVideo.videoHeight;
+  c.getContext('2d').drawImage(scanVideo, 0, 0);
+  // Map detected quad (detect-canvas coords) into image coords
+  const qs = scanner.lastQuality.quadScale;
+  const imgQuad = scanner.lastQuality.quad.map(p => ({ x: p.x * qs, y: p.y * qs }));
+  captureState.perPose[pose] = { sharpness: sharp, frame: c, imgQuad };
+  updatePoseUI();
+  if (POSES.every(p => captureState.perPose[p])) {
+    finalizeMultiAngle();
+  }
+}
+
+function finalizeMultiAngle() {
+  if (captureState.finished) return;
+  captureState.finished = true;
+  // Use the center frame for analysis (least perspective distortion to rectify).
+  const center = captureState.perPose.center;
+  state.sourceImage = center.frame;
+  // Rectify directly from image-space quad — no manual crop step.
+  state.rectifiedCanvas = rectifyFromImageCorners(center.frame, center.imgQuad);
+  stopScan(true);
+  unlockScreen('analysis');
+  showScreen('analysis');
+  startAnalysis();
+  // After a moment, restore welcome UI for the next session
+  setTimeout(() => {
+    scanStage.style.display = 'none';
+    scanWelcome.style.display = 'block';
+    resetCaptureState();
+    updatePoseUI();
+  }, 600);
+}
 
 async function startScan() {
   scanWelcome.style.display = 'none';
@@ -45,9 +163,9 @@ async function startScan() {
     stopScan(false); // reset UI back to welcome on permission/error
     return;
   }
-  // Note: we deliberately don't eager-load OpenCV here. Its WASM init blocks
-  // the main thread for several seconds on mobile, freezing the live scan and
-  // making the device heat up. OpenCV loads once on the crop screen instead.
+  // OpenCV lives in a Worker — its WASM compile + every detect runs off the
+  // main thread, so the camera stays responsive even on phones.
+  setupCvWorker();
   scanVideo.srcObject = scanner.stream;
   await scanVideo.play().catch(() => {});
 
@@ -111,7 +229,7 @@ function loop() {
 const detectCanvas = document.createElement('canvas');
 const detectCtx = detectCanvas.getContext('2d', { willReadFrequently: true });
 
-async function runDetectionStep() {
+function runDetectionStep() {
   if (!scanVideo.videoWidth) return;
 
   // Downsample the current video frame for fast analysis
@@ -126,28 +244,28 @@ async function runDetectionStep() {
   detectCtx.drawImage(scanVideo, 0, 0, dw, dh);
   const imgData = detectCtx.getImageData(0, 0, dw, dh);
 
-  // 1. Brightness (mean) & contrast
+  // 1. Brightness (mean) & contrast — cheap, sync on main thread
   const { mean, stddev } = brightnessStats(imgData);
 
-  // 2. Sharpness via Laplacian variance
+  // 2. Sharpness via Laplacian variance — cheap, sync
   const sharpness = laplacianVariance(imgData);
 
-  // 3. Card detection via OpenCV — heavy, so only every cvDetectInterval ms.
-  //    Reuse previous quad between cv runs so the overlay stays drawn.
-  let quad = scanner.lastQuality.quad;
-  const tCv = performance.now();
-  if (tCv - scanner.lastCvDetectAt > scanner.cvDetectInterval) {
-    scanner.lastCvDetectAt = tCv;
-    if (window.cv && window.cv.imread) {
-      quad = detectCardQuadInFrame(detectCanvas);
-    } else {
-      quad = null;
-    }
+  // 3. Card detection runs in the Worker. Reuse last known quad until the
+  //    next worker reply arrives.
+  const quad = scanner.lastQuality.quad;
+  const now = performance.now();
+  if (cvWorkerReady && !scanner.cvBusy && now - scanner.lastCvDispatchAt > scanner.cvInterval) {
+    scanner.lastCvDispatchAt = now;
+    scanner.cvBusy = true;
+    scanner.cvSeq++;
+    // Transfer the underlying buffer so we don't pay a copy
+    cvWorker.postMessage(
+      { type: 'detect', id: scanner.cvSeq, rgba: imgData.data, w: dw, h: dh },
+      [imgData.data.buffer]
+    );
   }
 
-  // 4. Framing score: how well does the detected quad align with the guide rect?
-  //    The guide is centered, 68% width, 5:7 aspect ratio of the SCANNER (3:4 wrap).
-  //    Translate to detect-canvas coords.
+  // 4. Framing score (uses whatever quad we currently have)
   let frameScore = 0;
   let coverage = 0;
   if (quad) {
@@ -155,7 +273,6 @@ async function runDetectionStep() {
     frameScore = framingScore(quad, dw, dh);
   }
 
-  // Normalize all scores to 0–1
   const sharpNorm = clamp(sharpness / 600, 0, 1);
   const lightNorm = clamp((mean - 30) / 140, 0, 1) * clamp(stddev / 50, 0, 1);
   const detectNorm = quad ? 1 : 0;
@@ -167,13 +284,30 @@ async function runDetectionStep() {
     light: lightNorm,
     frame: frameNorm,
     quad,
-    quadScale: 1 / s, // to map back to video coords
+    quadScale: 1 / s, // map detect-canvas coords back to video coords
     coverage,
     mean,
     stddev,
     sharpness,
   };
 
+  updateHUD();
+  updateInstruction();
+}
+
+// Called when the worker sends back a fresh quad detection.
+function onCvDetectResult(_id, quad) {
+  // Update only the quad — keep the most recent brightness/sharpness stats.
+  scanner.lastQuality.quad = quad;
+  scanner.lastQuality.detect = quad ? 1 : 0;
+  if (quad) {
+    const dCanvas = detectCanvas;
+    scanner.lastQuality.coverage = quadAreaRatio(quad, dCanvas.width, dCanvas.height);
+    scanner.lastQuality.frame = framingScore(quad, dCanvas.width, dCanvas.height);
+  } else {
+    scanner.lastQuality.coverage = 0;
+    scanner.lastQuality.frame = 0;
+  }
   updateHUD();
   updateInstruction();
 }
@@ -388,75 +522,109 @@ function drawScanOverlay() {
 }
 
 // ─────── HUD & instruction updates ───────
+// The HUD is now a row of 5 pose dots + a dynamic guidance message.
+// We update them in updatePoseUI() called from runDetectionStep and onCvDetectResult.
 function updateHUD() {
-  const q = scanner.lastQuality;
-  const bars = [
-    { el: document.querySelector('.hud-bar[data-key="detect"]'), v: q.detect, goodAt: 0.99 },
-    { el: document.querySelector('.hud-bar[data-key="sharp"]'),  v: q.sharp,  goodAt: 0.55 },
-    { el: document.querySelector('.hud-bar[data-key="light"]'),  v: q.light,  goodAt: 0.45 },
-    { el: document.querySelector('.hud-bar[data-key="frame"]'),  v: q.frame,  goodAt: 0.7 },
-  ];
-  bars.forEach(({ el, v, goodAt }) => {
-    const fill = el.querySelector('.hud-bar-fill');
-    fill.style.width = (v * 100).toFixed(0) + '%';
-    el.classList.toggle('good', v >= goodAt);
-    el.classList.toggle('mid', v >= goodAt * 0.6 && v < goodAt);
-  });
-
-  scannerWrap.classList.toggle('ready', isAllGood());
+  scannerWrap.classList.toggle('ready', isQualityGood());
+  updatePoseUI();
 }
 
-function isAllGood() {
-  const q = scanner.lastQuality;
-  return q.detect >= 0.99 && q.sharp >= 0.55 && q.light >= 0.45 && q.frame >= 0.7;
+function updatePoseUI() {
+  POSES.forEach(p => {
+    const dot = document.querySelector(`.pose-dot[data-pose="${p}"]`);
+    if (!dot) return;
+    dot.classList.toggle('captured', !!captureState.perPose[p]);
+  });
+  // Optional count badge if it exists in the DOM
+  const badge = document.getElementById('poseCount');
+  if (badge) {
+    const n = POSES.filter(p => captureState.perPose[p]).length;
+    badge.textContent = `${n}/${POSES.length}`;
+  }
 }
 
 function updateInstruction() {
   const q = scanner.lastQuality;
   let msg, good = false;
-  if (q.detect < 0.99) msg = 'Hold a card inside the frame';
-  else if (q.light < 0.45) msg = 'More light, please';
-  else if (q.sharp < 0.55) msg = 'Hold steady · focus';
-  else if (q.frame < 0.4) {
-    // Try to be specific
-    if (q.coverage < 0.25) msg = 'Move closer';
-    else if (q.coverage > 0.85) msg = 'Pull back a bit';
-    else msg = 'Center the card';
+
+  if (!cvWorkerReady) {
+    msg = 'Initialisiere Detektor…';
+  } else if (q.detect < 0.99) {
+    msg = 'Halt eine Karte ins Bild';
+  } else if (q.light < 0.35) {
+    msg = 'Mehr Licht bitte';
+  } else if (q.sharp < 0.45) {
+    msg = 'Ruhig halten · scharfstellen';
+  } else if (q.frame < 0.55) {
+    if (q.coverage < 0.25) msg = 'Näher ran';
+    else if (q.coverage > 0.85) msg = 'Etwas weiter weg';
+    else msg = 'Karte mittig halten';
+  } else {
+    // Quality is good — guide toward the next missing pose
+    const currentPose = classifyPose(q.quad);
+    const missing = POSES.find(p => !captureState.perPose[p]);
+    if (!missing) {
+      msg = 'Alle Posen erfasst — Analyse läuft…';
+      good = true;
+    } else if (currentPose === missing) {
+      msg = `Genau so halten · Pose ${missing} wird erfasst`;
+      good = true;
+    } else {
+      msg = POSE_HINT[missing];
+    }
   }
-  else if (q.frame < 0.7) msg = 'Almost there · straighten';
-  else { msg = 'Looking good · keep still'; good = true; }
   scanInstruction.textContent = msg;
   scanInstruction.classList.toggle('good', good);
 }
 
-// ─────── Auto-capture ───────
-function updateAutoCapture(dt) {
-  if (isAllGood()) {
-    scanner.readyStreak = Math.min(scanner.readyTarget, scanner.readyStreak + dt);
-    captureRing.classList.add('active');
-    const pct = scanner.readyStreak / scanner.readyTarget;
-    ringFill.style.strokeDashoffset = (289 * (1 - pct)).toFixed(1);
-    if (scanner.readyStreak >= scanner.readyTarget) {
-      autoCapture();
-    }
-  } else {
-    scanner.readyStreak = Math.max(0, scanner.readyStreak - dt * 1.5);
-    if (scanner.readyStreak < 50) {
-      captureRing.classList.remove('active');
-      ringFill.style.strokeDashoffset = 289;
-    } else {
-      const pct = scanner.readyStreak / scanner.readyTarget;
-      ringFill.style.strokeDashoffset = (289 * (1 - pct)).toFixed(1);
-    }
+// ─────── Per-frame capture trigger ───────
+// On every detection step, if quality is good and the current pose isn't yet
+// captured (or this frame is sharper than what we have), store it. No 700ms
+// hold-still timer — sharpness is the gate.
+function updateAutoCapture(_dt) {
+  if (captureState.finished) return;
+  // Light pose-progress ring around the scanner: how many of 5 are done
+  const done = POSES.filter(p => captureState.perPose[p]).length;
+  captureRing.classList.toggle('active', done > 0);
+  const pct = done / POSES.length;
+  ringFill.style.strokeDashoffset = (289 * (1 - pct)).toFixed(1);
+  maybeRecordPoseFrame();
+}
+
+// Manual single-shot fallback (Capture-now button): just snap whatever we have
+// right now and use it as the center frame, even if not all poses are filled.
+function manualCapture() {
+  if (captureState.finished) return;
+  const q = scanner.lastQuality;
+  if (!q.quad) {
+    alert('Keine Karte erkannt — bitte ins Bild halten.');
+    return;
   }
+  const c = document.createElement('canvas');
+  c.width = scanVideo.videoWidth;
+  c.height = scanVideo.videoHeight;
+  c.getContext('2d').drawImage(scanVideo, 0, 0);
+  const qs = q.quadScale;
+  const imgQuad = q.quad.map(p => ({ x: p.x * qs, y: p.y * qs }));
+  captureState.perPose.center = captureState.perPose.center || { sharpness: q.sharpness, frame: c, imgQuad };
+  // Force-finish: rectify center, jump to analysis
+  captureState.finished = true;
+  state.sourceImage = c;
+  state.rectifiedCanvas = rectifyFromImageCorners(c, imgQuad);
+  stopScan(true);
+  unlockScreen('analysis');
+  showScreen('analysis');
+  startAnalysis();
+  setTimeout(() => {
+    scanStage.style.display = 'none';
+    scanWelcome.style.display = 'block';
+    resetCaptureState();
+    updatePoseUI();
+  }, 600);
 }
 
-function autoCapture() {
-  if (!scanner.running) return;
-  scanner.running = false; // freeze loop
-  captureFrameNow();
-}
-
+// Legacy single-shot path — kept so the Crop screen still has a way in via
+// "Load demo card", but no longer used by the live scanner.
 function captureFrameNow() {
   // Snap full-resolution frame to an Image
   const c = document.createElement('canvas');
@@ -482,12 +650,12 @@ function captureFrameNow() {
 }
 
 // Wire up buttons
-document.getElementById('btnStartScan').addEventListener('click', startScan);
-document.getElementById('btnCancelScan').addEventListener('click', () => stopScan(false));
-document.getElementById('btnManualCapture').addEventListener('click', () => {
-  scanner.running = false;
-  captureFrameNow();
+document.getElementById('btnStartScan').addEventListener('click', () => {
+  resetCaptureState();
+  startScan();
 });
+document.getElementById('btnCancelScan').addEventListener('click', () => stopScan(false));
+document.getElementById('btnManualCapture').addEventListener('click', manualCapture);
 
 function loadImage(file) {
   // Kept for backwards compat (e.g. demo card path), but no file-picker UI anymore

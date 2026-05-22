@@ -343,20 +343,20 @@ main {
 /* Instruction text */
 .scan-instruction {
   position: absolute;
-  top: 24px;
-  left: 50%;
-  transform: translateX(-50%);
+  top: 18px;
+  left: 12px;
+  right: 12px;
   z-index: 5;
   background: rgba(7,7,10,0.85);
   backdrop-filter: blur(10px);
   color: var(--ink);
-  padding: 10px 18px;
-  border-radius: 100px;
+  padding: 10px 14px;
+  border-radius: 18px;
   font-family: var(--mono);
-  font-size: 11px;
-  letter-spacing: 0.18em;
+  font-size: 10.5px;
+  letter-spacing: 0.12em;
   text-transform: uppercase;
-  white-space: nowrap;
+  text-align: center;
   border: 1px solid rgba(255,255,255,0.1);
   transition: all 0.3s;
 }
@@ -365,50 +365,49 @@ main {
   border-color: rgba(95,220,140,0.4);
 }
 
-/* HUD bars */
-.scan-hud {
+/* Pose progress HUD (5 dots: center + 4 tilt directions in a plus layout) */
+.pose-hud {
   position: absolute;
   bottom: 100px;
-  left: 16px;
-  right: 16px;
+  left: 50%;
+  transform: translateX(-50%);
   z-index: 5;
-  display: grid;
-  grid-template-columns: repeat(4, 1fr);
-  gap: 8px;
-}
-.hud-bar {
-  background: rgba(7,7,10,0.7);
-  backdrop-filter: blur(10px);
-  border: 1px solid rgba(255,255,255,0.08);
-  border-radius: 6px;
-  padding: 8px 10px;
   display: flex;
   flex-direction: column;
-  gap: 4px;
+  align-items: center;
+  gap: 6px;
+  padding: 12px 18px 8px;
+  background: rgba(7,7,10,0.75);
+  backdrop-filter: blur(10px);
+  border: 1px solid rgba(255,255,255,0.08);
+  border-radius: 14px;
 }
-.hud-label {
+.pose-row {
+  display: flex;
+  gap: 14px;
+  justify-content: center;
+}
+.pose-dot {
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  border: 1.5px solid rgba(255,255,255,0.25);
+  background: transparent;
+  transition: all 0.25s;
+}
+.pose-dot.captured {
+  background: var(--green);
+  border-color: var(--green);
+  box-shadow: 0 0 12px rgba(95,220,140,0.55);
+}
+.pose-count {
   font-family: var(--mono);
-  font-size: 9px;
-  letter-spacing: 0.15em;
+  font-size: 10px;
+  letter-spacing: 0.2em;
   text-transform: uppercase;
   color: var(--ink-dim);
+  margin-top: 4px;
 }
-.hud-bar-track {
-  height: 3px;
-  background: rgba(255,255,255,0.1);
-  border-radius: 2px;
-  overflow: hidden;
-}
-.hud-bar-fill {
-  height: 100%;
-  width: 0%;
-  background: var(--magenta);
-  transition: width 0.2s, background 0.2s;
-  border-radius: 2px;
-}
-.hud-bar.good .hud-bar-fill { background: var(--green); }
-.hud-bar.mid .hud-bar-fill { background: var(--gold); }
-.hud-bar.good .hud-label { color: var(--green); }
 
 /* Capture ring (animated when ready) */
 .capture-ring {

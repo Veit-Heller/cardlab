@@ -85,24 +85,20 @@
           Hold a card inside the frame
         </div>
 
-        <!-- Quality bars HUD -->
-        <div class="scan-hud">
-          <div class="hud-bar" data-key="detect">
-            <span class="hud-label">Detect</span>
-            <div class="hud-bar-track"><div class="hud-bar-fill"></div></div>
+        <!-- Pose progress: 5 dots representing center + 4 tilt directions -->
+        <div class="pose-hud">
+          <div class="pose-row">
+            <div class="pose-dot" data-pose="up" title="Obere Kante zur Kamera"></div>
           </div>
-          <div class="hud-bar" data-key="sharp">
-            <span class="hud-label">Sharpness</span>
-            <div class="hud-bar-track"><div class="hud-bar-fill"></div></div>
+          <div class="pose-row">
+            <div class="pose-dot" data-pose="left" title="Linke Seite zur Kamera"></div>
+            <div class="pose-dot" data-pose="center" title="Gerade halten"></div>
+            <div class="pose-dot" data-pose="right" title="Rechte Seite zur Kamera"></div>
           </div>
-          <div class="hud-bar" data-key="light">
-            <span class="hud-label">Light</span>
-            <div class="hud-bar-track"><div class="hud-bar-fill"></div></div>
+          <div class="pose-row">
+            <div class="pose-dot" data-pose="down" title="Untere Kante zur Kamera"></div>
           </div>
-          <div class="hud-bar" data-key="frame">
-            <span class="hud-label">Framing</span>
-            <div class="hud-bar-track"><div class="hud-bar-fill"></div></div>
-          </div>
+          <div class="pose-count" id="poseCount">0/5</div>
         </div>
 
         <!-- Capture progress ring -->
