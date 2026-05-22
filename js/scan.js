@@ -16,7 +16,9 @@ const scanner = {
   running: false,
   rafId: null,
   lastDetectAt: 0,
-  detectInterval: 125, // ms → ~8 FPS detection
+  detectInterval: 250, // ms → ~4 FPS for cheap stats (brightness/sharpness)
+  lastCvDetectAt: 0,
+  cvDetectInterval: 1500, // ms → OpenCV quad detection (heavy on mobile)
   lastQuality: { detect: 0, sharp: 0, light: 0, frame: 0, quad: null },
   qualityHistory: [], // ring buffer of recent "all good" booleans
   readyStreak: 0, // ms accumulated while all bars are good
@@ -43,8 +45,9 @@ async function startScan() {
     stopScan(false); // reset UI back to welcome on permission/error
     return;
   }
-  // Camera up — kick off OpenCV in the background so detection engages once ready.
-  loadOpenCV().catch(e => console.warn('OpenCV failed to load:', e));
+  // Note: we deliberately don't eager-load OpenCV here. Its WASM init blocks
+  // the main thread for several seconds on mobile, freezing the live scan and
+  // making the device heat up. OpenCV loads once on the crop screen instead.
   scanVideo.srcObject = scanner.stream;
   await scanVideo.play().catch(() => {});
 
@@ -129,10 +132,17 @@ async function runDetectionStep() {
   // 2. Sharpness via Laplacian variance
   const sharpness = laplacianVariance(imgData);
 
-  // 3. Card detection via OpenCV (if loaded) or fallback
-  let quad = null;
-  if (window.cv && window.cv.imread) {
-    quad = detectCardQuadInFrame(detectCanvas);
+  // 3. Card detection via OpenCV — heavy, so only every cvDetectInterval ms.
+  //    Reuse previous quad between cv runs so the overlay stays drawn.
+  let quad = scanner.lastQuality.quad;
+  const tCv = performance.now();
+  if (tCv - scanner.lastCvDetectAt > scanner.cvDetectInterval) {
+    scanner.lastCvDetectAt = tCv;
+    if (window.cv && window.cv.imread) {
+      quad = detectCardQuadInFrame(detectCanvas);
+    } else {
+      quad = null;
+    }
   }
 
   // 4. Framing score: how well does the detected quad align with the guide rect?
