@@ -539,7 +539,7 @@ function drawScanOverlay() {
   });
   ctx.closePath();
 
-  const allGood = isAllGood();
+  const allGood = isQualityGood();
   ctx.strokeStyle = allGood ? 'rgba(95,220,140,0.95)' : 'rgba(106,255,227,0.85)';
   ctx.lineWidth = 3;
   ctx.shadowColor = allGood ? 'rgba(95,220,140,0.6)' : 'rgba(106,255,227,0.5)';
