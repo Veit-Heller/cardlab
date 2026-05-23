@@ -19,11 +19,25 @@ const scanner = {
   rafId: null,
   lastFrameTime: 0,
   lastCvDispatchAt: 0,
-  cvInterval: 250,
+  cvInterval: 200,
   cvBusy: false,
   cvSeq: 0,
-  lastQuality: { detect: 0, sharp: 0, light: 0, frame: 0, quad: null, quadScale: 1 },
+  lastQuality: {
+    detect: 0, sharp: 0, light: 0, frame: 0, glare: 0,
+    quad: null, quadScale: 1, sharpness: 0, coverage: 0,
+  },
+  // Stability tracking — last N quads in video coords. Auto-snap fires when
+  // every corner stayed within STABLE_RADIUS px of the recent median for
+  // STABLE_DURATION_MS.
+  quadHistory: [],            // array of { t, quad: [{x,y}*4 in video coords] }
+  stableSinceMs: 0,           // first timestamp the quad was confirmed stable
+  lastAutoSnapAt: 0,          // throttle so we don't fire twice
 };
+
+const STABLE_HISTORY_MS = 1200;   // keep ~last 1.2 s of quads
+const STABLE_DURATION_MS = 900;   // require quad steady this long
+const STABLE_RADIUS_PX = 18;      // max corner jitter (video pixels)
+const AUTO_SNAP_COOLDOWN_MS = 2500;
 
 // ─────── OpenCV Worker ───────
 let cvWorker = null;
@@ -179,10 +193,10 @@ function stopScan(skipUI = false) {
   }
 }
 
-// ─────── Live preview loop ───────
-// Detection here is *preview-only* — it shows the user where the card is so
-// they know when to tap "Foto machen". The high-res snap goes through a
-// separate file-input pipeline below.
+// ─────── Live loop ───────
+// All capture decisions happen inside the loop — no user button required.
+// When quad + sharpness + stability + low-glare are all satisfied, auto-snap
+// fires; the snap-now button below is a manual escape hatch only.
 function loop() {
   if (!scanner.running) return;
   try {
@@ -193,11 +207,41 @@ function loop() {
     updateInstruction();
     updateDebug();
     updateCaptureButton();
+    maybeAutoSnap(now);
   } catch (e) {
     setDebug('loop-err: ' + (e.message || e));
     console.error('[scan loop]', e);
   }
   scanner.rafId = requestAnimationFrame(loop);
+}
+
+// All five gates must pass for auto-snap to fire.
+function autoSnapGates() {
+  const q = scanner.lastQuality;
+  return {
+    cv:        cvWorkerReady,
+    detect:    q.detect >= 0.99,
+    sharp:     q.sharp >= 0.30,            // looser than the old 0.45
+    light:     q.light >= 0.25,
+    frame:     q.frame >= 0.55,
+    aspect:    q.frame >= 0.55,            // framingScore already weights aspect
+    glareOk:   q.glare < 0.06,             // <6% near-white pixels in card area
+    stable:    isQuadStable(),
+  };
+}
+
+function allGatesPass(g) {
+  return g.cv && g.detect && g.sharp && g.light && g.frame && g.glareOk && g.stable;
+}
+
+function maybeAutoSnap(now) {
+  if (capture.busy) return;
+  if (now - scanner.lastAutoSnapAt < AUTO_SNAP_COOLDOWN_MS) return;
+  const g = autoSnapGates();
+  if (allGatesPass(g)) {
+    scanner.lastAutoSnapAt = now;
+    captureHiRes();
+  }
 }
 
 const detectCanvas = document.createElement('canvas');
@@ -242,10 +286,79 @@ function handleCvResult(_id, quad) {
   if (quad) {
     scanner.lastQuality.coverage = quadAreaRatio(quad, detectCanvas.width, detectCanvas.height);
     scanner.lastQuality.frame = framingScore(quad, detectCanvas.width, detectCanvas.height);
+    scanner.lastQuality.glare = glareRatio(quad);
+    // Push quad (in video coords) into stability history
+    const qs = scanner.lastQuality.quadScale;
+    const videoQuad = quad.map(p => ({ x: p.x * qs, y: p.y * qs }));
+    const now = performance.now();
+    scanner.quadHistory.push({ t: now, quad: videoQuad });
+    while (scanner.quadHistory.length > 0 &&
+           now - scanner.quadHistory[0].t > STABLE_HISTORY_MS) {
+      scanner.quadHistory.shift();
+    }
   } else {
     scanner.lastQuality.coverage = 0;
     scanner.lastQuality.frame = 0;
+    scanner.lastQuality.glare = 0;
+    scanner.quadHistory.length = 0;
+    scanner.stableSinceMs = 0;
   }
+}
+
+// Glare ratio: fraction of pixels inside the detected quad whose luminance
+// is in specular-highlight territory (>= 245). Bigger = more reflection,
+// auto-capture should hold off so we don't snap a hazy frame.
+function glareRatio(quadDetect) {
+  // Sample the detect canvas at quad-bounded coords. Cheap bounding-box
+  // approximation rather than a real polygon mask — fine for a gate.
+  try {
+    const W = detectCanvas.width, H = detectCanvas.height;
+    const ctx = detectCanvas.getContext('2d');
+    const data = ctx.getImageData(0, 0, W, H).data;
+    let minX = W, maxX = 0, minY = H, maxY = 0;
+    quadDetect.forEach(p => {
+      if (p.x < minX) minX = p.x;
+      if (p.x > maxX) maxX = p.x;
+      if (p.y < minY) minY = p.y;
+      if (p.y > maxY) maxY = p.y;
+    });
+    minX = Math.max(0, minX | 0); maxX = Math.min(W-1, maxX | 0);
+    minY = Math.max(0, minY | 0); maxY = Math.min(H-1, maxY | 0);
+    let hot = 0, total = 0;
+    for (let y = minY; y <= maxY; y += 3) {
+      for (let x = minX; x <= maxX; x += 3) {
+        const i = (y * W + x) * 4;
+        const lum = (data[i] + data[i+1] + data[i+2]) / 3;
+        if (lum >= 245) hot++;
+        total++;
+      }
+    }
+    return total > 0 ? hot / total : 0;
+  } catch (e) {
+    return 0;
+  }
+}
+
+// Have the last STABLE_DURATION_MS of quads stayed within STABLE_RADIUS_PX
+// per corner? If so, the user is holding steady and we can snap.
+function isQuadStable() {
+  const hist = scanner.quadHistory;
+  if (hist.length < 4) return false;
+  const now = performance.now();
+  // Look at the window: must span at least STABLE_DURATION_MS
+  if (now - hist[0].t < STABLE_DURATION_MS) return false;
+  // Compute per-corner max deviation from the most recent quad
+  const ref = hist[hist.length - 1].quad;
+  for (let i = 0; i < 4; i++) {
+    let maxDev = 0;
+    for (let j = 0; j < hist.length; j++) {
+      const p = hist[j].quad[i];
+      const d = Math.hypot(p.x - ref[i].x, p.y - ref[i].y);
+      if (d > maxDev) maxDev = d;
+    }
+    if (maxDev > STABLE_RADIUS_PX) return false;
+  }
+  return true;
 }
 
 // ─────── Quality math (cheap, on main thread) ───────
@@ -312,6 +425,10 @@ function framingScore(quad, W, H) {
 }
 
 // ─────── Overlay rendering ───────
+// Outline colour reflects state:
+//   yellow  = card detected, not yet good (quality / framing / glare problem)
+//   cyan    = quality good but not yet stable enough to capture
+//   green pulsing = stable, auto-snap imminent
 function drawScanOverlay() {
   const ctx = scanOverlay.getContext('2d');
   ctx.clearRect(0, 0, scanOverlay.width, scanOverlay.height);
@@ -329,7 +446,26 @@ function drawScanOverlay() {
     scale = ow / vw; offX = 0; offY = (oh - vh * scale) / 2;
   }
   const qs = scanner.lastQuality.quadScale;
-  const good = isQualityGood();
+  const qualOk = isQualityGood();
+  const stable = qualOk && isQuadStable();
+
+  let stroke, glow, dot;
+  if (stable) {
+    // Pulse green when about to fire
+    const t = (performance.now() % 800) / 800;
+    const alpha = 0.7 + 0.3 * Math.sin(t * Math.PI * 2);
+    stroke = `rgba(95,220,140,${alpha.toFixed(2)})`;
+    glow = 'rgba(95,220,140,0.8)';
+    dot = '#5fdc8c';
+  } else if (qualOk) {
+    stroke = 'rgba(106,255,227,0.9)';
+    glow = 'rgba(106,255,227,0.5)';
+    dot = '#6affe3';
+  } else {
+    stroke = 'rgba(240,204,127,0.85)';
+    glow = 'rgba(240,204,127,0.4)';
+    dot = '#f0cc7f';
+  }
 
   ctx.beginPath();
   q.forEach((p, i) => {
@@ -338,18 +474,18 @@ function drawScanOverlay() {
     if (i === 0) ctx.moveTo(ox, oy); else ctx.lineTo(ox, oy);
   });
   ctx.closePath();
-  ctx.strokeStyle = good ? 'rgba(95,220,140,0.95)' : 'rgba(106,255,227,0.85)';
-  ctx.lineWidth = 3;
-  ctx.shadowColor = good ? 'rgba(95,220,140,0.6)' : 'rgba(106,255,227,0.5)';
-  ctx.shadowBlur = 12;
+  ctx.strokeStyle = stroke;
+  ctx.lineWidth = stable ? 4 : 3;
+  ctx.shadowColor = glow;
+  ctx.shadowBlur = stable ? 18 : 12;
   ctx.stroke();
   ctx.shadowBlur = 0;
   q.forEach(p => {
     const ox = p.x * qs * scale + offX;
     const oy = p.y * qs * scale + offY;
-    ctx.fillStyle = good ? '#5fdc8c' : '#6affe3';
+    ctx.fillStyle = dot;
     ctx.beginPath();
-    ctx.arc(ox, oy, 5, 0, Math.PI*2);
+    ctx.arc(ox, oy, stable ? 7 : 5, 0, Math.PI*2);
     ctx.fill();
   });
 }
@@ -362,7 +498,7 @@ function isQualityGood() {
 
 function updateInstruction() {
   if (capture.busy) {
-    scanInstruction.textContent = 'Foto wird verarbeitet…';
+    scanInstruction.textContent = '📸 Foto wird verarbeitet…';
     scanInstruction.classList.add('good');
     return;
   }
@@ -374,14 +510,21 @@ function updateInstruction() {
     msg = 'Initialisiere Detektor…';
   } else if (q.detect < 0.99) {
     msg = `${sideLabel} ins Bild halten`;
-  } else if (q.light < 0.30) {
+  } else if (q.light < 0.25) {
     msg = 'Mehr Licht bitte';
-  } else if (q.frame < 0.50) {
-    if (q.coverage < 0.25) msg = 'Näher ran';
+  } else if (q.glare >= 0.06) {
+    msg = 'Licht spiegelt · Karte leicht kippen';
+  } else if (q.frame < 0.55) {
+    if (q.coverage < 0.25) msg = 'Näher ran an die Karte';
     else if (q.coverage > 0.85) msg = 'Etwas weiter weg';
     else msg = 'Karte mittig halten';
+  } else if (q.sharp < 0.30) {
+    msg = 'Ruhig halten · Fokus';
+  } else if (!isQuadStable()) {
+    msg = `${sideLabel} ruhig halten…`;
+    good = true;
   } else {
-    msg = `${sideLabel} bereit · Tap auf Foto-Button`;
+    msg = '✨ Halten…';
     good = true;
   }
   scanInstruction.textContent = msg;
@@ -390,13 +533,18 @@ function updateInstruction() {
 
 function updateCaptureButton() {
   if (!btnCaptureCard) return;
-  const ready = isQualityGood() && !capture.busy;
-  btnCaptureCard.disabled = !ready;
-  btnCaptureCard.classList.toggle('ready', ready);
+  // Manual capture button is now an escape hatch — present but secondary,
+  // because in the normal flow we auto-snap. Show it always so the user has
+  // a fallback if auto-detection never converges.
+  btnCaptureCard.disabled = capture.busy || !cvWorkerReady;
+  const goodNow = !capture.busy && cvWorkerReady &&
+                  scanner.lastQuality.detect >= 0.99 &&
+                  scanner.lastQuality.light >= 0.25;
+  btnCaptureCard.classList.toggle('ready', goodNow);
   btnCaptureCard.textContent = capture.busy
     ? '⏳ Verarbeite…'
-    : `📸 ${SIDE_LABEL[capture.side]} fotografieren`;
-  scannerWrap.classList.toggle('ready', ready);
+    : `📸 Manuell auslösen`;
+  scannerWrap.classList.toggle('ready', isQualityGood() && isQuadStable());
 }
 
 // ─────── On-screen debug strip ───────
@@ -406,10 +554,15 @@ function updateDebug() {
   const el = document.getElementById('scanDebug');
   if (!el) return;
   const q = scanner.lastQuality;
+  const g = autoSnapGates();
+  const flag = (c, ch) => c ? ch : '·';
+  // Compact 6-gate readout: Detect / Sharp / Light / Frame / Glare / sTability
+  const gates = flag(g.detect, 'D') + flag(g.sharp, 'S') + flag(g.light, 'L') +
+                flag(g.frame, 'F') + flag(g.glareOk, 'G') + flag(g.stable, 'T');
   el.textContent =
-    `side:${capture.side}  ${capture.busy ? 'busy' : 'ready=' + isQualityGood()}\n` +
+    `${capture.side}${capture.busy ? ' BUSY' : ''}  gates:${gates}\n` +
     `sharp:${(q.sharpness||0).toFixed(0)} frame:${(q.frame||0).toFixed(2)} ` +
-    `light:${(q.light||0).toFixed(2)} detect:${q.detect}` +
+    `light:${(q.light||0).toFixed(2)} glare:${(q.glare||0).toFixed(2)}` +
     (lastDebugErr ? `\n${lastDebugErr}` : '');
 }
 
@@ -424,34 +577,65 @@ async function captureHiRes() {
   setDebug('');
 
   try {
-    let snapCanvas = null;
-
-    // 1) ImageCapture API — gives the highest still-photo resolution the
-    //    camera supports, separate from the (smaller) video preview stream.
+    // ─── 3-frame burst, sharpest wins ───
+    // Grab three quick captures and pick the one with the highest Laplacian
+    // variance. Modern camera shutter takes ~80–200 ms; a burst at 100 ms
+    // intervals gives us enough variation to discard motion-blurred frames.
     const track = scanner.stream && scanner.stream.getVideoTracks()[0];
-    if (track && typeof window.ImageCapture === 'function') {
-      try {
-        const ic = new window.ImageCapture(track);
-        const photoBlob = await ic.takePhoto();
-        const bitmap = await createImageBitmap(photoBlob);
-        snapCanvas = document.createElement('canvas');
-        snapCanvas.width = bitmap.width;
-        snapCanvas.height = bitmap.height;
-        snapCanvas.getContext('2d').drawImage(bitmap, 0, 0);
-        bitmap.close && bitmap.close();
-      } catch (e) {
-        console.warn('[capture] ImageCapture failed, falling back to video frame:', e.message || e);
-        snapCanvas = null;
+    const ic = (track && typeof window.ImageCapture === 'function')
+      ? new window.ImageCapture(track) : null;
+
+    async function grabOne() {
+      if (ic) {
+        try {
+          const blob = await ic.takePhoto();
+          const bmp = await createImageBitmap(blob);
+          const c = document.createElement('canvas');
+          c.width = bmp.width; c.height = bmp.height;
+          c.getContext('2d').drawImage(bmp, 0, 0);
+          bmp.close && bmp.close();
+          return c;
+        } catch (_) { /* fall through */ }
       }
+      const c = document.createElement('canvas');
+      c.width = scanVideo.videoWidth;
+      c.height = scanVideo.videoHeight;
+      c.getContext('2d').drawImage(scanVideo, 0, 0);
+      return c;
     }
 
-    // 2) Fallback: grab current video frame at stream resolution.
-    if (!snapCanvas) {
-      snapCanvas = document.createElement('canvas');
-      snapCanvas.width = scanVideo.videoWidth;
-      snapCanvas.height = scanVideo.videoHeight;
-      snapCanvas.getContext('2d').drawImage(scanVideo, 0, 0);
+    function quickSharpness(canvas) {
+      // Cheap Laplacian-variance estimate on a downsampled grey copy
+      const W = 240;
+      const s = W / canvas.width;
+      const H = Math.max(1, Math.round(canvas.height * s));
+      const tmp = document.createElement('canvas');
+      tmp.width = W; tmp.height = H;
+      tmp.getContext('2d').drawImage(canvas, 0, 0, W, H);
+      const d = tmp.getContext('2d').getImageData(0, 0, W, H).data;
+      const g = new Float32Array(W * H);
+      for (let i = 0; i < W*H; i++) g[i] = (d[i*4] + d[i*4+1] + d[i*4+2]) / 3;
+      let sum = 0, sumSq = 0, n = 0;
+      for (let y = 1; y < H-1; y += 2) {
+        for (let x = 1; x < W-1; x += 2) {
+          const c = g[y*W + x];
+          const lap = 4*c - g[(y-1)*W+x] - g[(y+1)*W+x] - g[y*W+(x-1)] - g[y*W+(x+1)];
+          sum += lap; sumSq += lap*lap; n++;
+        }
+      }
+      if (n === 0) return 0;
+      const m = sum / n;
+      return sumSq / n - m*m;
     }
+
+    const shots = [];
+    for (let k = 0; k < 3; k++) {
+      shots.push(await grabOne());
+      if (k < 2) await new Promise(r => setTimeout(r, 100));
+    }
+    shots.sort((a, b) => quickSharpness(b) - quickSharpness(a));
+    let snapCanvas = shots[0];
+    setDebug(`burst: ${shots.length} shots, sharpest first`);
 
     // Cap at 2400px long side to keep WASM memory + rectify work bounded.
     const MAX_DIM = 2400;
@@ -475,45 +659,38 @@ async function captureHiRes() {
       });
     }
 
-    // Detect the card quad. If detection fails or returns something implausible,
-    // we still open the editor — the user can drag corners manually.
+    // Detect the card quad in the high-res snap. We try once on the sharpest
+    // shot; if it fails or returns garbage, we try the next-sharpest shot.
     let quad = null;
-    try {
-      quad = await detectInImage(workCanvas);
-    } catch (e) {
-      console.warn('[detect on snap]', e.message);
-    }
-    if (quad && !isQuadPlausible(quad, workCanvas.width, workCanvas.height)) {
-      // Auto-detection returned something but it's almost-the-whole-image or
-      // an absurd aspect ratio. Drop it; user adjusts from defaults.
-      quad = null;
-    }
-
-    // Pause the live scanner while the user is in the crop editor — otherwise
-    // the camera keeps running in the background and burns battery.
-    pauseLiveScan();
-
-    const sideLabel = SIDE_LABEL[capture.side];
-    openCropEditor(workCanvas, quad, {
-      sideLabel,
-      onConfirm: (rectified) => {
-        if (capture.side === 'front') {
-          state.frontCard = rectified;
-          state.sourceImage = rectified;
-          state.rectifiedCanvas = rectified;
-          capture.side = 'back';
-          capture.busy = false;
-          // Back to scanner for the back side
-          resumeLiveScan();
-          showScreen('capture');
-          flashSideTransition();
-        } else {
-          state.backCard = rectified;
-          finalizeCapture();
+    for (const shot of shots) {
+      const wc = shot === snapCanvas ? workCanvas : downscaleForWork(shot);
+      try {
+        const q = await detectInImage(wc);
+        if (q && isQuadPlausible(q, wc.width, wc.height)) {
+          quad = q;
+          snapCanvas = shot;
+          break;
         }
-      },
+      } catch (_) {}
+    }
+
+    if (quad) {
+      // Auto-flow: rectify straight to result, no editor.
+      const finalCanvas = (snapCanvas === shots[0]) ? workCanvas : downscaleForWork(snapCanvas);
+      const rectified = rectifyFromImageCorners(finalCanvas, quad, CARD_OUT_W, CARD_OUT_H);
+      advanceWithRectified(rectified);
+      return;
+    }
+
+    // Auto-detection failed across all shots. Fall back to the crop editor
+    // so the user has a way out — but this is a recovery path, not the
+    // success path.
+    pauseLiveScan();
+    const sideLabel = SIDE_LABEL[capture.side];
+    openCropEditor(workCanvas, null, {
+      sideLabel,
+      onConfirm: (rectified) => advanceWithRectified(rectified),
       onBack: () => {
-        // Cancel this snap, return to scanner for another try
         capture.busy = false;
         resumeLiveScan();
         showScreen('capture');
@@ -523,6 +700,36 @@ async function captureHiRes() {
     console.warn('[hires capture]', e);
     alert('Fehler beim Verarbeiten: ' + (e.message || e));
     capture.busy = false;
+  }
+}
+
+// Helper: downscale a snap to the 2400px work canvas used for detection.
+function downscaleForWork(src) {
+  const MAX_DIM = 2400;
+  if (Math.max(src.width, src.height) <= MAX_DIM) return src;
+  const s = MAX_DIM / Math.max(src.width, src.height);
+  const c = document.createElement('canvas');
+  c.width = Math.round(src.width * s);
+  c.height = Math.round(src.height * s);
+  c.getContext('2d').drawImage(src, 0, 0, c.width, c.height);
+  return c;
+}
+
+// Shared "we now have a rectified card for this side" path. Used both by the
+// auto-snap success path and the crop editor's onConfirm fallback.
+function advanceWithRectified(rectified) {
+  if (capture.side === 'front') {
+    state.frontCard = rectified;
+    state.sourceImage = rectified;
+    state.rectifiedCanvas = rectified;
+    capture.side = 'back';
+    capture.busy = false;
+    resumeLiveScan();
+    showScreen('capture');
+    flashSideTransition();
+  } else {
+    state.backCard = rectified;
+    finalizeCapture();
   }
 }
 
