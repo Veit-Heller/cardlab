@@ -475,29 +475,83 @@ async function captureHiRes() {
       });
     }
 
-    const quad = await detectInImage(workCanvas);
-    if (!quad) {
-      alert(`Karte nicht erkannt — versuch's nochmal. Tipps: dunkler Untergrund, gleichmäßiges Licht, Karte mittig im Bild, kein Finger auf einer Ecke.`);
-      capture.busy = false;
-      return;
+    // Detect the card quad. If detection fails or returns something implausible,
+    // we still open the editor — the user can drag corners manually.
+    let quad = null;
+    try {
+      quad = await detectInImage(workCanvas);
+    } catch (e) {
+      console.warn('[detect on snap]', e.message);
+    }
+    if (quad && !isQuadPlausible(quad, workCanvas.width, workCanvas.height)) {
+      // Auto-detection returned something but it's almost-the-whole-image or
+      // an absurd aspect ratio. Drop it; user adjusts from defaults.
+      quad = null;
     }
 
-    const rectified = rectifyFromImageCorners(workCanvas, quad, CARD_OUT_W, CARD_OUT_H);
-    if (capture.side === 'front') {
-      state.frontCard = rectified;
-      state.sourceImage = rectified;
-      state.rectifiedCanvas = rectified;
-      capture.side = 'back';
-      flashSideTransition();
-      capture.busy = false;
-    } else {
-      state.backCard = rectified;
-      finalizeCapture();
-    }
+    // Pause the live scanner while the user is in the crop editor — otherwise
+    // the camera keeps running in the background and burns battery.
+    pauseLiveScan();
+
+    const sideLabel = SIDE_LABEL[capture.side];
+    openCropEditor(workCanvas, quad, {
+      sideLabel,
+      onConfirm: (rectified) => {
+        if (capture.side === 'front') {
+          state.frontCard = rectified;
+          state.sourceImage = rectified;
+          state.rectifiedCanvas = rectified;
+          capture.side = 'back';
+          capture.busy = false;
+          // Back to scanner for the back side
+          resumeLiveScan();
+          showScreen('capture');
+          flashSideTransition();
+        } else {
+          state.backCard = rectified;
+          finalizeCapture();
+        }
+      },
+      onBack: () => {
+        // Cancel this snap, return to scanner for another try
+        capture.busy = false;
+        resumeLiveScan();
+        showScreen('capture');
+      },
+    });
   } catch (e) {
     console.warn('[hires capture]', e);
     alert('Fehler beim Verarbeiten: ' + (e.message || e));
     capture.busy = false;
+  }
+}
+
+// Plausibility check for an auto-detected quad. Rejects "near-the-whole-image"
+// detections (= the algorithm probably latched onto the photo border, not the
+// card) and absurd aspect ratios.
+function isQuadPlausible(quad, W, H) {
+  const area = quadAreaRatio(quad, W, H);
+  if (area < 0.10 || area > 0.92) return false;
+  const lh = dist(quad[0], quad[3]);
+  const rh = dist(quad[1], quad[2]);
+  const tw = dist(quad[0], quad[1]);
+  const bw = dist(quad[3], quad[2]);
+  const w = (tw + bw) / 2;
+  const h = (lh + rh) / 2;
+  const ratio = Math.min(w, h) / Math.max(w, h);
+  // Pokémon card aspect ≈ 0.714; allow 0.55–0.85 after perspective.
+  return ratio > 0.55 && ratio < 0.85;
+}
+
+function pauseLiveScan() {
+  scanner.running = false;
+  if (scanner.rafId) cancelAnimationFrame(scanner.rafId);
+}
+function resumeLiveScan() {
+  if (!scanner.running && scanner.stream) {
+    scanner.running = true;
+    scanner.lastFrameTime = performance.now();
+    loop();
   }
 }
 

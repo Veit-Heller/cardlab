@@ -117,11 +117,11 @@
         <canvas id="cropCanvas"></canvas>
       </div>
       <div class="crop-side">
-        <h2>Frame the <em>card</em>.</h2>
-        <p>Drag the four corners to align with the card's edges. We'll rectify the perspective and analyze the surface.</p>
-        <button class="btn-primary" id="confirmCrop">Continue to Analysis →</button>
-        <button class="btn-secondary" id="autoCorners">Auto-detect corners</button>
-        <button class="btn-secondary" id="backToCapture">← Use a different photo</button>
+        <h2>Karte <em>justieren</em>.</h2>
+        <p>Zieh die vier Ecken auf die Ränder der Karte. Wir entzerren dann die Perspektive und entfernen alles drumherum.</p>
+        <button class="btn-primary" id="confirmCrop">Weiter →</button>
+        <button class="btn-secondary" id="autoCorners">Automatisch erkennen</button>
+        <button class="btn-secondary" id="backToCapture">← Nochmal fotografieren</button>
       </div>
     </div>
   </section>
@@ -212,11 +212,16 @@
       </div>
 
       <div class="showcase-controls">
-        <button class="holo-style active" data-style="cosmos">Cosmos</button>
+        <button class="holo-style" data-style="cosmos">Cosmos</button>
         <button class="holo-style" data-style="rainbow">Rainbow</button>
         <button class="holo-style" data-style="gold">Gold Crown</button>
         <button class="holo-style" data-style="subtle">Subtle</button>
         <button id="enableGyro" style="margin-left:20px;">📱 Enable tilt</button>
+      </div>
+
+      <div class="showcase-downloads">
+        <button id="btnDownloadFront">⬇︎ Vorderseite (PNG)</button>
+        <button id="btnDownloadBack">⬇︎ Rückseite (PNG)</button>
       </div>
     </div>
   </section>

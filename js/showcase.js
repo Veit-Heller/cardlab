@@ -27,6 +27,14 @@ function initShowcase() {
     holoCardImgBack.style.background =
       'linear-gradient(135deg, #1a1a1a, #0a0a0a) center/cover no-repeat';
   }
+
+  // Holo overlay layers OFF by default — they overlay the actual scan and the
+  // user wants to see the real card. User can enable an effect via the style
+  // buttons below the card.
+  [holoPattern, holoRainbow, holoSparkle, holoGlare].forEach(el => {
+    el.style.display = 'none';
+  });
+  document.querySelectorAll('.holo-style').forEach(b => b.classList.remove('active'));
 }
 
 // Mouse / pointer tilt
@@ -106,13 +114,41 @@ function startGyro() {
   });
 }
 
-// Holo style switching
+// Holo style switching — click a style to turn on the overlay; click the same
+// active style again to turn it off (so "no overlay" is reachable from the UI).
 document.querySelectorAll('.holo-style').forEach(btn => {
   btn.addEventListener('click', () => {
+    const wasActive = btn.classList.contains('active');
     document.querySelectorAll('.holo-style').forEach(b => b.classList.remove('active'));
-    btn.classList.add('active');
-    applyHoloStyle(btn.dataset.style);
+    if (wasActive) {
+      // toggle off: hide all overlay layers
+      [holoPattern, holoRainbow, holoSparkle, holoGlare].forEach(el => el.style.display = 'none');
+    } else {
+      [holoPattern, holoRainbow, holoSparkle, holoGlare].forEach(el => el.style.display = '');
+      btn.classList.add('active');
+      applyHoloStyle(btn.dataset.style);
+    }
   });
+});
+
+// PNG download — let the user grab the digitised card as a file
+function downloadCardPng(canvas, filename) {
+  if (!canvas) return;
+  const url = canvas.toDataURL('image/png');
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+}
+const dlFrontBtn = document.getElementById('btnDownloadFront');
+const dlBackBtn = document.getElementById('btnDownloadBack');
+if (dlFrontBtn) dlFrontBtn.addEventListener('click', () => {
+  downloadCardPng(state.frontCard || state.rectifiedCanvas, 'cardlab-front.png');
+});
+if (dlBackBtn) dlBackBtn.addEventListener('click', () => {
+  downloadCardPng(state.backCard, 'cardlab-back.png');
 });
 
 function applyHoloStyle(style) {

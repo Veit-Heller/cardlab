@@ -952,6 +952,32 @@ main {
   color: var(--gold-bright);
 }
 
+/* Download buttons in the showcase */
+.showcase-downloads {
+  margin-top: 20px;
+  display: flex;
+  gap: 10px;
+  justify-content: center;
+  flex-wrap: wrap;
+}
+.showcase-downloads button {
+  background: transparent;
+  border: 1px solid rgba(212,175,106,0.25);
+  color: var(--ink-dim);
+  padding: 8px 16px;
+  font-family: var(--mono);
+  font-size: 10px;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  cursor: pointer;
+  border-radius: 2px;
+  transition: all 0.2s;
+}
+.showcase-downloads button:hover {
+  border-color: var(--gold);
+  color: var(--gold);
+}
+
 /* Loading state */
 .loading-text {
   font-family: var(--mono);
