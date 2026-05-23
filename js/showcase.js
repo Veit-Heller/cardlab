@@ -1,27 +1,48 @@
 // SCREEN 4: HOLO SHOWCASE
 // 3D tilt + animated holographic foil effects driven by mouse / device gyro.
+// The card is a flippable 3D object — front and back are separate textures.
 
+const holoFlip = document.getElementById('holoFlip');
 const holoCard = document.getElementById('holoCard');
-const holoCardImg = document.getElementById('holoCardImg');
+const holoCardImgFront = document.getElementById('holoCardImgFront');
+const holoCardImgBack = document.getElementById('holoCardImgBack');
 const holoPattern = document.getElementById('holoPattern');
 const holoSparkle = document.getElementById('holoSparkle');
 const holoGlare = document.getElementById('holoGlare');
 const holoRainbow = document.getElementById('holoRainbow');
 
+let flipped = false;
+let lastTilt = { mx: 0.5, my: 0.5 };
+
 function initShowcase() {
-  if (state.rectifiedCanvas) {
-    holoCardImg.style.backgroundImage = `url(${state.rectifiedCanvas.toDataURL('image/png')})`;
+  // Front: prefer the high-res frontCard captured by the new scan flow,
+  // fall back to the legacy rectifiedCanvas (single-shot / demo path).
+  const frontSrc = state.frontCard || state.rectifiedCanvas;
+  if (frontSrc) {
+    holoCardImgFront.style.backgroundImage = `url(${frontSrc.toDataURL('image/png')})`;
   }
+  if (state.backCard) {
+    holoCardImgBack.style.backgroundImage = `url(${state.backCard.toDataURL('image/png')})`;
+  } else {
+    // No back captured (demo / legacy flow) — show a subtle placeholder
+    holoCardImgBack.style.background =
+      'linear-gradient(135deg, #1a1a1a, #0a0a0a) center/cover no-repeat';
+  }
+  flipped = false;
+  holoCard.style.setProperty('--flip', '0deg');
 }
 
 // Mouse / pointer tilt
 function setTilt(mx, my, rect) {
+  lastTilt.mx = mx; lastTilt.my = my;
   // mx, my in 0..1
   const rx = (0.5 - my) * 22; // rotateX
   const ry = (mx - 0.5) * 22; // rotateY
+  const flipDeg = flipped ? 180 : 0;
   holoCard.style.setProperty('--rx', rx + 'deg');
   holoCard.style.setProperty('--ry', ry + 'deg');
-  holoCard.style.transform = `rotateX(${rx}deg) rotateY(${ry}deg)`;
+  holoCard.style.setProperty('--flip', flipDeg + 'deg');
+  holoCard.style.transform = `rotateX(${rx}deg) rotateY(${ry + flipDeg}deg)`;
 
   // Move highlight position
   const mxPct = (mx * 100).toFixed(1) + '%';
@@ -53,8 +74,26 @@ function onPointerMove(e) {
 }
 function onPointerLeave() {
   holoCard.classList.add('float');
-  holoCard.style.transform = '';
+  // Reset transform but preserve flip state via CSS variable so the float
+  // animation keeps the card oriented correctly.
+  const flipDeg = flipped ? 180 : 0;
+  holoCard.style.transform = `rotateY(${flipDeg}deg)`;
 }
+
+// Tap / click the card to flip it. The float animation keeps using --flip so
+// the orientation stays right while idle.
+function toggleFlip() {
+  flipped = !flipped;
+  const flipDeg = flipped ? 180 : 0;
+  holoCard.classList.add('float'); // re-engage float so transition smooths
+  holoCard.style.setProperty('--flip', flipDeg + 'deg');
+  // Direct transform so the 0.5s ease transition kicks in even mid-tilt
+  holoCard.style.transform = `rotateY(${flipDeg}deg)`;
+  // Hide the hint after the first flip
+  const hint = document.getElementById('holoFlipHint');
+  if (hint) hint.style.opacity = '0';
+}
+holoFlip.addEventListener('click', toggleFlip);
 
 document.getElementById('screen-showcase').addEventListener('mousemove', onPointerMove);
 document.getElementById('screen-showcase').addEventListener('mouseleave', onPointerLeave);
@@ -77,10 +116,9 @@ function startGyro() {
   window.addEventListener('deviceorientation', (e) => {
     if (e.beta === null || e.gamma === null) return;
     holoCard.classList.remove('float');
-    // beta: front-back tilt (-180..180), gamma: left-right (-90..90)
     const x = Math.max(0, Math.min(1, 0.5 + (e.gamma / 60)));
     const y = Math.max(0, Math.min(1, 0.5 + ((e.beta - 30) / 60)));
-    setTilt(x, y);
+    setTilt(x, y); // setTilt already folds flip into the transform
   });
 }
 

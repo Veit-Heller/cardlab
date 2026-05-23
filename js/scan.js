@@ -53,73 +53,52 @@ function setupCvWorker() {
   };
 }
 
-// ─────── Multi-angle capture: pose detection + state machine ───────
-// We classify the current card pose from the projected quad and require the
-// user to hold the card in each of 5 poses (center + 4 tilts). The sharpest
-// frame per pose is kept; once all 5 are collected, the center frame is
-// rectified and handed to the analysis screen.
-const POSES = ['center', 'left', 'right', 'up', 'down'];
-const POSE_HINT = {
-  center: 'Halt die Karte gerade vor die Kamera',
-  left:   'Jetzt linke Seite zur Kamera neigen',
-  right:  'Jetzt rechte Seite zur Kamera neigen',
-  up:     'Jetzt obere Kante zur Kamera neigen',
-  down:   'Jetzt untere Kante zur Kamera neigen',
-};
+// ─────── Two-stage capture: Front side, then Back side ───────
+// Each stage runs the live scan until we've buffered enough consecutive
+// good-quality frames. We then snap the sharpest of them, rectify it at
+// high resolution, move on to the back side, and finally hand off to
+// analysis + showcase. The card ends up as two clean canvases with
+// background fully eliminated by perspective rectification.
 
-const captureState = {
-  perPose: {}, // pose → { sharpness, frame: Canvas, imgQuad: [{x,y}*4] }
+const CARD_OUT_W = 1500;          // ~600dpi for a 2.5″ wide card
+const CARD_OUT_H = 2100;          // ~600dpi for a 3.5″ tall card
+const GOOD_FRAMES_NEEDED = 5;     // consecutive good frames before snap — one per HUD dot
+const SIDE_LABEL = { front: 'Vorderseite', back: 'Rückseite' };
+
+const capture = {
+  side: 'front',
   finished: false,
+  goodBuffer: [], // {sharpness, frame: Canvas, imgQuad}
+  results: { front: null, back: null },
 };
-function resetCaptureState() {
-  captureState.perPose = {};
-  captureState.finished = false;
-  POSES.forEach(p => { captureState.perPose[p] = null; });
-}
-resetCaptureState();
 
-// Classify the pose by comparing edge lengths of the detected quad.
-// Returns 'center' | 'left' | 'right' | 'up' | 'down' | null.
-function classifyPose(quad) {
-  if (!quad) return null;
-  const lh = dist(quad[0], quad[3]); // TL-BL  left edge in projection
-  const rh = dist(quad[1], quad[2]); // TR-BR  right edge
-  const tw = dist(quad[0], quad[1]); // TL-TR  top edge
-  const bw = dist(quad[3], quad[2]); // BL-BR  bottom edge
-  // tx > 0 → left edge appears longer than right → card tilted so left side is closer to camera
-  // ty > 0 → bottom edge appears longer than top → card tilted so bottom is closer to camera
-  const tx = (lh - rh) / (lh + rh);
-  const ty = (bw - tw) / (bw + tw);
-  const T = 0.04; // ~5° tilt registers; was 0.07 (~10°) which felt unreachable
-  if (Math.abs(tx) < T && Math.abs(ty) < T) return 'center';
-  if (Math.abs(tx) > Math.abs(ty)) return tx > 0 ? 'left' : 'right';
-  return ty > 0 ? 'down' : 'up';
+function resetCapture() {
+  capture.side = 'front';
+  capture.finished = false;
+  capture.goodBuffer.length = 0;
+  capture.results = { front: null, back: null };
 }
+resetCapture();
 
-// Are quad + light + framing all "good enough" to consider capturing?
-// Sharpness is NOT a gate — it would block forever on phones whose normal
-// handheld blur sits below the threshold. Instead we use it as a tiebreaker
-// inside maybeRecordPoseFrame(): the sharpest frame seen for each pose wins.
+// Quality gate for buffering a frame: quad detected + decent light + reasonable framing.
+// Sharpness is not gated — used inside the buffer to pick the sharpest.
 function isQualityGood() {
   const q = scanner.lastQuality;
-  return q.detect >= 0.99 && q.light >= 0.35 && q.frame >= 0.55;
+  return q.detect >= 0.99 && q.light >= 0.30 && q.frame >= 0.50;
 }
 
-// If the current frame is good and improves over what we have for this pose, store it.
-// Wrapped in try/catch — any exception here used to kill the rAF loop entirely,
-// freezing the whole scan UI.
-function maybeRecordPoseFrame() {
-  if (captureState.finished) return;
-  if (!isQualityGood()) return;
+// Called every rAF: buffer good frames, snap when we've seen enough in a row.
+// A bad frame resets the buffer so wobble + steady shots don't mix.
+function maybeBufferFrame() {
+  if (capture.finished) return;
+  if (!isQualityGood()) {
+    if (capture.goodBuffer.length > 0) capture.goodBuffer.length = 0;
+    return;
+  }
   try {
-    const pose = classifyPose(scanner.lastQuality.quad);
-    if (!pose) return;
-    const slot = captureState.perPose[pose];
-    const sharp = scanner.lastQuality.sharpness;
-    if (slot && slot.sharpness >= sharp) return; // not better
-    // Cap captured frame to ~1280px on the long side so 5 of them don't blow
-    // through phone memory (full-HD × 5 = ~40MB of RGBA pixels).
-    const MAX_DIM = 1280;
+    // Source-side cap: 1920px long side keeps the rectifier well-fed for ~600dpi
+    // output without holding 8 × full-HD canvases in memory.
+    const MAX_DIM = 1920;
     const vw = scanVideo.videoWidth, vh = scanVideo.videoHeight;
     const s = Math.min(1, MAX_DIM / Math.max(vw, vh));
     const cw = Math.round(vw * s), ch = Math.round(vh * s);
@@ -127,57 +106,78 @@ function maybeRecordPoseFrame() {
     c.width = cw;
     c.height = ch;
     c.getContext('2d').drawImage(scanVideo, 0, 0, cw, ch);
-    // Quad → capture-canvas coords: detect → video (× quadScale) → capture (× s)
     const qs = scanner.lastQuality.quadScale * s;
     const imgQuad = scanner.lastQuality.quad.map(p => ({ x: p.x * qs, y: p.y * qs }));
-    captureState.perPose[pose] = { sharpness: sharp, frame: c, imgQuad };
-    updatePoseUI();
-    if (POSES.every(p => captureState.perPose[p])) {
-      finalizeMultiAngle();
+    capture.goodBuffer.push({
+      sharpness: scanner.lastQuality.sharpness,
+      frame: c,
+      imgQuad,
+    });
+    if (capture.goodBuffer.length >= GOOD_FRAMES_NEEDED) {
+      finalizeSide();
     }
   } catch (e) {
-    setDebug('capture-err: ' + (e.message || e));
-    console.warn('[capture]', e);
+    setDebug('buffer-err: ' + (e.message || e));
+    console.warn('[buffer]', e);
   }
 }
 
-// ─────── On-screen debug strip ───────
-// Small overlay so the user (and we) can see what the scanner is doing
-// when something silently fails.
-let lastDebugErr = '';
-function setDebug(msg) {
-  lastDebugErr = msg;
-}
-function updateDebug() {
-  const el = document.getElementById('scanDebug');
-  if (!el) return;
-  const q = scanner.lastQuality;
-  const pose = q.quad ? classifyPose(q.quad) : '–';
-  el.textContent =
-    `pose:${pose}  sharp:${(q.sharpness||0).toFixed(0)}  ` +
-    `frame:${(q.frame||0).toFixed(2)}  detect:${q.detect}` +
-    (lastDebugErr ? `\n${lastDebugErr}` : '');
+// Pick the sharpest buffered frame for the current side, rectify it, advance.
+function finalizeSide() {
+  capture.goodBuffer.sort((a, b) => b.sharpness - a.sharpness);
+  const best = capture.goodBuffer[0];
+  const rectified = rectifyFromImageCorners(best.frame, best.imgQuad, CARD_OUT_W, CARD_OUT_H);
+  capture.results[capture.side] = { canvas: rectified, imgQuad: best.imgQuad };
+  capture.goodBuffer.length = 0;
+
+  if (capture.side === 'front') {
+    state.frontCard = rectified;
+    capture.side = 'back';
+    flashSideTransition();
+  } else {
+    state.backCard = rectified;
+    finalizeAll();
+  }
 }
 
-function finalizeMultiAngle() {
-  if (captureState.finished) return;
-  captureState.finished = true;
-  // Use the center frame for analysis (least perspective distortion to rectify).
-  const center = captureState.perPose.center;
-  state.sourceImage = center.frame;
-  // Rectify directly from image-space quad — no manual crop step.
-  state.rectifiedCanvas = rectifyFromImageCorners(center.frame, center.imgQuad);
+function finalizeAll() {
+  if (capture.finished) return;
+  capture.finished = true;
+  // Back-compat with the analysis screen
+  state.sourceImage = capture.results.front.canvas;
+  state.rectifiedCanvas = state.frontCard;
   stopScan(true);
   unlockScreen('analysis');
   showScreen('analysis');
   startAnalysis();
-  // After a moment, restore welcome UI for the next session
   setTimeout(() => {
     scanStage.style.display = 'none';
     scanWelcome.style.display = 'block';
-    resetCaptureState();
-    updatePoseUI();
+    resetCapture();
   }, 600);
+}
+
+// Short on-screen overlay between front and back capture so the user has
+// a clear cue to flip the card.
+function flashSideTransition() {
+  const el = document.getElementById('sideTransition');
+  if (!el) return;
+  el.classList.add('show');
+  setTimeout(() => el.classList.remove('show'), 1800);
+}
+
+// ─────── On-screen debug strip ───────
+let lastDebugErr = '';
+function setDebug(msg) { lastDebugErr = msg; }
+function updateDebug() {
+  const el = document.getElementById('scanDebug');
+  if (!el) return;
+  const q = scanner.lastQuality;
+  el.textContent =
+    `side:${capture.side}  buffer:${capture.goodBuffer.length}/${GOOD_FRAMES_NEEDED}\n` +
+    `sharp:${(q.sharpness||0).toFixed(0)}  frame:${(q.frame||0).toFixed(2)}  ` +
+    `light:${(q.light||0).toFixed(2)}  detect:${q.detect}` +
+    (lastDebugErr ? `\n${lastDebugErr}` : '');
 }
 
 async function startScan() {
@@ -561,74 +561,57 @@ function drawScanOverlay() {
 }
 
 // ─────── HUD & instruction updates ───────
-// The HUD is now a row of 5 pose dots + a dynamic guidance message.
-// We update them in updatePoseUI() called from runDetectionStep and onCvDetectResult.
 function updateHUD() {
   scannerWrap.classList.toggle('ready', isQualityGood());
-  updatePoseUI();
+  updateCaptureProgressUI();
 }
 
-function updatePoseUI() {
-  const currentPose = classifyPose(scanner.lastQuality.quad);
-  POSES.forEach(p => {
-    const dot = document.querySelector(`.pose-dot[data-pose="${p}"]`);
-    if (!dot) return;
-    dot.classList.toggle('captured', !!captureState.perPose[p]);
-    // Highlight which pose the algorithm currently thinks the user is holding —
-    // so they can see "I'm tilting but it's still reading 'center', tilt more".
-    dot.classList.toggle('current', p === currentPose);
+// Pose-dots are now repurposed as a capture-progress meter: one dot per
+// buffered good frame, on the way to GOOD_FRAMES_NEEDED.
+function updateCaptureProgressUI() {
+  const dots = document.querySelectorAll('.pose-dot');
+  const filled = capture.goodBuffer.length;
+  dots.forEach((dot, i) => {
+    dot.classList.toggle('captured', i < filled);
+    dot.classList.toggle('current', i === filled && filled < GOOD_FRAMES_NEEDED);
   });
   const badge = document.getElementById('poseCount');
   if (badge) {
-    const n = POSES.filter(p => captureState.perPose[p]).length;
-    badge.textContent = `${n}/${POSES.length}`;
+    badge.textContent = `${SIDE_LABEL[capture.side]} · ${filled}/${GOOD_FRAMES_NEEDED}`;
   }
 }
 
 function updateInstruction() {
   const q = scanner.lastQuality;
   let msg, good = false;
+  const sideLabel = SIDE_LABEL[capture.side];
 
   if (!cvWorkerReady) {
     msg = 'Initialisiere Detektor…';
   } else if (q.detect < 0.99) {
-    msg = 'Halt eine Karte ins Bild';
-  } else if (q.light < 0.35) {
+    msg = `${sideLabel} vor die Kamera halten`;
+  } else if (q.light < 0.30) {
     msg = 'Mehr Licht bitte';
-  } else if (q.frame < 0.55) {
+  } else if (q.frame < 0.50) {
     if (q.coverage < 0.25) msg = 'Näher ran';
     else if (q.coverage > 0.85) msg = 'Etwas weiter weg';
     else msg = 'Karte mittig halten';
   } else {
-    // Quality is good — guide toward the next missing pose
-    const currentPose = classifyPose(q.quad);
-    const missing = POSES.find(p => !captureState.perPose[p]);
-    if (!missing) {
-      msg = 'Alle Posen erfasst — Analyse läuft…';
-      good = true;
-    } else if (currentPose === missing) {
-      msg = `Genau so halten · Pose ${missing} wird erfasst`;
-      good = true;
-    } else {
-      msg = POSE_HINT[missing];
-    }
+    msg = `${sideLabel} · ruhig halten…`;
+    good = true;
   }
   scanInstruction.textContent = msg;
   scanInstruction.classList.toggle('good', good);
 }
 
-// ─────── Per-frame capture trigger ───────
-// On every detection step, if quality is good and the current pose isn't yet
-// captured (or this frame is sharper than what we have), store it. No 700ms
-// hold-still timer — sharpness is the gate.
+// Per-frame capture trigger: buffer good frames, snap sharpest of N in a row.
 function updateAutoCapture(_dt) {
-  if (captureState.finished) return;
-  // Light pose-progress ring around the scanner: how many of 5 are done
-  const done = POSES.filter(p => captureState.perPose[p]).length;
-  captureRing.classList.toggle('active', done > 0);
-  const pct = done / POSES.length;
+  if (capture.finished) return;
+  const filled = capture.goodBuffer.length;
+  captureRing.classList.toggle('active', filled > 0);
+  const pct = filled / GOOD_FRAMES_NEEDED;
   ringFill.style.strokeDashoffset = (289 * (1 - pct)).toFixed(1);
-  maybeRecordPoseFrame();
+  maybeBufferFrame();
 }
 
 // Legacy single-shot path — only reached now via "Load demo card" through
@@ -659,7 +642,7 @@ function captureFrameNow() {
 
 // Wire up buttons
 document.getElementById('btnStartScan').addEventListener('click', () => {
-  resetCaptureState();
+  resetCapture();
   startScan();
 });
 document.getElementById('btnCancelScan').addEventListener('click', () => stopScan(false));

@@ -82,7 +82,16 @@
 
         <!-- Instruction text -->
         <div class="scan-instruction" id="scanInstruction">
-          Hold a card inside the frame
+          Vorderseite vor die Kamera halten
+        </div>
+
+        <!-- Side-transition overlay: shown for ~1.8s between front and back capture -->
+        <div class="side-transition" id="sideTransition">
+          <div class="side-transition-inner">
+            <div class="st-step">Vorderseite ✓</div>
+            <div class="st-action">Karte umdrehen</div>
+            <div class="st-hint">jetzt Rückseite scannen</div>
+          </div>
         </div>
 
         <!-- Pose progress: 5 dots representing center + 4 tilt directions -->
@@ -207,13 +216,17 @@
         <p>Move your mouse · Tilt your device</p>
       </div>
 
-      <div class="holo-card float" id="holoCard">
-        <div class="layer card-img" id="holoCardImg"></div>
-        <div class="layer holo-pattern" id="holoPattern"></div>
-        <div class="layer holo-rainbow" id="holoRainbow"></div>
-        <div class="layer holo-sparkle" id="holoSparkle"></div>
-        <div class="layer holo-glare" id="holoGlare"></div>
-        <div class="layer holo-frame"></div>
+      <div class="holo-flip" id="holoFlip">
+        <div class="holo-card float" id="holoCard">
+          <div class="layer card-img card-img-front" id="holoCardImgFront"></div>
+          <div class="layer card-img card-img-back" id="holoCardImgBack"></div>
+          <div class="layer holo-pattern" id="holoPattern"></div>
+          <div class="layer holo-rainbow" id="holoRainbow"></div>
+          <div class="layer holo-sparkle" id="holoSparkle"></div>
+          <div class="layer holo-glare" id="holoGlare"></div>
+          <div class="layer holo-frame"></div>
+        </div>
+        <div class="holo-flip-hint" id="holoFlipHint">Tap zum Umdrehen</div>
       </div>
 
       <div class="showcase-controls">

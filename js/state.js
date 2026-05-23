@@ -2,9 +2,17 @@
 // Shared across all screen modules (scan, crop, analysis, showcase).
 
 const state = {
-  sourceImage: null,      // Original uploaded image
-  corners: null,          // 4 corner points {x,y} normalized to canvas
-  rectifiedCanvas: null,  // Perspective-corrected card canvas
+  // Legacy single-frame fields (still used by crop screen + analysis)
+  sourceImage: null,
+  corners: null,
+  rectifiedCanvas: null,    // alias for frontCard, kept for back-compat with analysis.js
+
+  // New: full card digitisation. Both are 1500×2100 canvases of the rectified card
+  // with background removed (only the card's own pixels). Set by scan.js after the
+  // Front+Back capture flow.
+  frontCard: null,
+  backCard: null,
+
   analysisResults: null,
   currentScreen: 'capture',
 };
