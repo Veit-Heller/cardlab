@@ -31,13 +31,16 @@ function detectQuad(rgba, w, h, opts = {}) {
   const cv = self.cv;
   if (!cv || !cv.imread) return null;
 
-  const minAreaRatio = opts.minAreaRatio ?? 0.08;
-  const maxAreaRatio = opts.maxAreaRatio ?? 0.95;
+  // Looser defaults than the original: real-world phone shots have busy
+  // backgrounds, partial-finger occlusion, and varying lighting, so we'd
+  // rather over-match a bit than reject every frame with a hand in it.
+  const minAreaRatio = opts.minAreaRatio ?? 0.05;
+  const maxAreaRatio = opts.maxAreaRatio ?? 0.97;
   const cannyLow = opts.cannyLow ?? 40;
   const cannyHigh = opts.cannyHigh ?? 120;
-  const approxEpsilon = opts.approxEpsilon ?? 0.025;
-  const minAspectRatio = opts.minAspectRatio ?? 0.5;
-  const maxAspectRatio = opts.maxAspectRatio ?? 0.92;
+  const approxEpsilon = opts.approxEpsilon ?? 0.04; // higher tolerance on "4 corners exactly"
+  const minAspectRatio = opts.minAspectRatio ?? 0.4;
+  const maxAspectRatio = opts.maxAspectRatio ?? 0.95;
 
   let src, gray, blurred, edges, kernel, hierarchy, contours;
   try {
