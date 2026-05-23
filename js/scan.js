@@ -90,7 +90,7 @@ function classifyPose(quad) {
   // ty > 0 → bottom edge appears longer than top → card tilted so bottom is closer to camera
   const tx = (lh - rh) / (lh + rh);
   const ty = (bw - tw) / (bw + tw);
-  const T = 0.07;
+  const T = 0.04; // ~5° tilt registers; was 0.07 (~10°) which felt unreachable
   if (Math.abs(tx) < T && Math.abs(ty) < T) return 'center';
   if (Math.abs(tx) > Math.abs(ty)) return tx > 0 ? 'left' : 'right';
   return ty > 0 ? 'down' : 'up';
@@ -536,12 +536,15 @@ function updateHUD() {
 }
 
 function updatePoseUI() {
+  const currentPose = classifyPose(scanner.lastQuality.quad);
   POSES.forEach(p => {
     const dot = document.querySelector(`.pose-dot[data-pose="${p}"]`);
     if (!dot) return;
     dot.classList.toggle('captured', !!captureState.perPose[p]);
+    // Highlight which pose the algorithm currently thinks the user is holding —
+    // so they can see "I'm tilting but it's still reading 'center', tilt more".
+    dot.classList.toggle('current', p === currentPose);
   });
-  // Optional count badge if it exists in the DOM
   const badge = document.getElementById('poseCount');
   if (badge) {
     const n = POSES.filter(p => captureState.perPose[p]).length;

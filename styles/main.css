@@ -388,25 +388,40 @@ main {
   justify-content: center;
 }
 .pose-dot {
-  width: 18px;
-  height: 18px;
+  width: 20px;
+  height: 20px;
   border-radius: 50%;
   border: 1.5px solid rgba(255,255,255,0.25);
   background: transparent;
-  transition: all 0.25s;
+  transition: background 0.25s, border-color 0.25s, box-shadow 0.25s;
 }
 .pose-dot.captured {
   background: var(--green);
   border-color: var(--green);
   box-shadow: 0 0 12px rgba(95,220,140,0.55);
 }
+/* The pose the classifier thinks the user is currently holding — pulses */
+.pose-dot.current:not(.captured) {
+  border-color: var(--cyan);
+  background: rgba(106,255,227,0.18);
+  animation: pose-current-pulse 1.2s ease-in-out infinite;
+}
+.pose-dot.current.captured {
+  /* still pulse subtly to show the user *is* on a captured pose right now */
+  box-shadow: 0 0 14px rgba(95,220,140,0.85);
+}
+@keyframes pose-current-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(106,255,227,0.5); }
+  50%      { box-shadow: 0 0 0 6px rgba(106,255,227,0); }
+}
 .pose-count {
   font-family: var(--mono);
-  font-size: 10px;
+  font-size: 13px;
+  font-weight: 500;
   letter-spacing: 0.2em;
   text-transform: uppercase;
-  color: var(--ink-dim);
-  margin-top: 4px;
+  color: var(--gold-bright);
+  margin-top: 6px;
 }
 
 /* Capture ring (animated when ready) */
