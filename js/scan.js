@@ -96,6 +96,12 @@ function resetCapture() {
 resetCapture();
 
 // ─────── Camera setup ───────
+// We request the highest resolution the device will actually give us so the
+// final snap is as high-res as possible (not a hard-coded 1080p cap).
+// Strategy:
+//   1. Ask for 4K with `ideal` — the browser will give us the best it can.
+//   2. After the stream is live, query `getCapabilities()` and `applyConstraints()`
+//      to push to the device-reported maximum (often higher than the initial grant).
 async function startScan() {
   scanWelcome.style.display = 'none';
   scanStage.style.display = 'block';
@@ -103,7 +109,11 @@ async function startScan() {
 
   try {
     scanner.stream = await navigator.mediaDevices.getUserMedia({
-      video: { facingMode: { ideal: 'environment' }, width: { ideal: 1920 }, height: { ideal: 1080 } },
+      video: {
+        facingMode: { ideal: 'environment' },
+        width:  { ideal: 3840 },
+        height: { ideal: 2160 },
+      },
       audio: false,
     });
   } catch (err) {
@@ -112,6 +122,24 @@ async function startScan() {
     stopScan(false);
     return;
   }
+
+  // Try to push to the device-reported maximum resolution after the stream is up.
+  const track = scanner.stream.getVideoTracks()[0];
+  if (track && typeof track.getCapabilities === 'function') {
+    try {
+      const caps = track.getCapabilities();
+      if (caps.width && caps.height) {
+        await track.applyConstraints({
+          width:  { ideal: caps.width.max  },
+          height: { ideal: caps.height.max },
+        });
+      }
+    } catch (e) {
+      // Some browsers reject applyConstraints — that's OK, we'll use what we got.
+      console.warn('[scan] applyConstraints rejected:', e.message || e);
+    }
+  }
+
   setupCvWorker();
   scanVideo.srcObject = scanner.stream;
   await scanVideo.play().catch(() => {});
@@ -120,6 +148,11 @@ async function startScan() {
   }
   resizeOverlay();
   window.addEventListener('resize', resizeOverlay);
+
+  // Log what we actually got — surfaces in the debug strip so we can see if
+  // the device gave us a real high-res stream or capped us.
+  const settings = track && typeof track.getSettings === 'function' ? track.getSettings() : {};
+  setDebug(`stream: ${settings.width || scanVideo.videoWidth}×${settings.height || scanVideo.videoHeight}`);
 
   scanner.running = true;
   scanner.lastFrameTime = performance.now();
@@ -380,45 +413,59 @@ function updateDebug() {
     (lastDebugErr ? `\n${lastDebugErr}` : '');
 }
 
-// ─────── High-res capture via native camera ───────
-// On iOS Safari this opens the full-screen native camera UI and returns a
-// 12MP+ still — way better than the 1080p we can pull from getUserMedia.
-function captureHiRes() {
+// ─────── High-res capture from the live stream ───────
+// First try ImageCapture API (Chrome Android — gives true sensor-resolution
+// stills, often higher than the video stream itself).
+// Fall back to grabbing the current video frame at stream resolution (works
+// everywhere including iOS Safari, capped at whatever the stream gave us).
+async function captureHiRes() {
   if (capture.busy) return;
-  const input = document.createElement('input');
-  input.type = 'file';
-  input.accept = 'image/*';
-  input.capture = 'environment';
-  input.style.display = 'none';
-  input.addEventListener('change', async (e) => {
-    const file = e.target.files && e.target.files[0];
-    if (!file) return;
-    await processHiResFile(file);
-  });
-  document.body.appendChild(input);
-  input.click();
-  // Clean up after a moment so the input isn't left hanging in the DOM.
-  setTimeout(() => input.remove(), 60000);
-}
-
-async function processHiResFile(file) {
   capture.busy = true;
   setDebug('');
+
   try {
-    const img = await loadImageFromFile(file);
-    // Draw to a canvas so the worker can read pixels from it.
+    let snapCanvas = null;
+
+    // 1) ImageCapture API — gives the highest still-photo resolution the
+    //    camera supports, separate from the (smaller) video preview stream.
+    const track = scanner.stream && scanner.stream.getVideoTracks()[0];
+    if (track && typeof window.ImageCapture === 'function') {
+      try {
+        const ic = new window.ImageCapture(track);
+        const photoBlob = await ic.takePhoto();
+        const bitmap = await createImageBitmap(photoBlob);
+        snapCanvas = document.createElement('canvas');
+        snapCanvas.width = bitmap.width;
+        snapCanvas.height = bitmap.height;
+        snapCanvas.getContext('2d').drawImage(bitmap, 0, 0);
+        bitmap.close && bitmap.close();
+      } catch (e) {
+        console.warn('[capture] ImageCapture failed, falling back to video frame:', e.message || e);
+        snapCanvas = null;
+      }
+    }
+
+    // 2) Fallback: grab current video frame at stream resolution.
+    if (!snapCanvas) {
+      snapCanvas = document.createElement('canvas');
+      snapCanvas.width = scanVideo.videoWidth;
+      snapCanvas.height = scanVideo.videoHeight;
+      snapCanvas.getContext('2d').drawImage(scanVideo, 0, 0);
+    }
+
     // Cap at 2400px long side to keep WASM memory + rectify work bounded.
     const MAX_DIM = 2400;
-    const s = Math.min(1, MAX_DIM / Math.max(img.width, img.height));
-    const cw = Math.round(img.width * s);
-    const ch = Math.round(img.height * s);
-    const c = document.createElement('canvas');
-    c.width = cw;
-    c.height = ch;
-    c.getContext('2d').drawImage(img, 0, 0, cw, ch);
+    let workCanvas = snapCanvas;
+    if (Math.max(snapCanvas.width, snapCanvas.height) > MAX_DIM) {
+      const s = MAX_DIM / Math.max(snapCanvas.width, snapCanvas.height);
+      workCanvas = document.createElement('canvas');
+      workCanvas.width = Math.round(snapCanvas.width * s);
+      workCanvas.height = Math.round(snapCanvas.height * s);
+      workCanvas.getContext('2d').drawImage(snapCanvas, 0, 0, workCanvas.width, workCanvas.height);
+    }
+    setDebug(`snap: ${snapCanvas.width}×${snapCanvas.height} → work ${workCanvas.width}×${workCanvas.height}`);
 
     if (!cvWorkerReady) {
-      // Edge case: worker hadn't finished loading yet. Wait briefly.
       await new Promise((res, rej) => {
         const t0 = Date.now();
         const iv = setInterval(() => {
@@ -428,15 +475,14 @@ async function processHiResFile(file) {
       });
     }
 
-    const quad = await detectInImage(c);
+    const quad = await detectInImage(workCanvas);
     if (!quad) {
-      alert(`Karte nicht erkannt — versuch's nochmal. Tipps: dunkler Untergrund, gleichmäßiges Licht, Karte mittig im Foto, kein Finger auf einer Ecke.`);
+      alert(`Karte nicht erkannt — versuch's nochmal. Tipps: dunkler Untergrund, gleichmäßiges Licht, Karte mittig im Bild, kein Finger auf einer Ecke.`);
       capture.busy = false;
       return;
     }
 
-    // Rectify at high resolution
-    const rectified = rectifyFromImageCorners(c, quad, CARD_OUT_W, CARD_OUT_H);
+    const rectified = rectifyFromImageCorners(workCanvas, quad, CARD_OUT_W, CARD_OUT_H);
     if (capture.side === 'front') {
       state.frontCard = rectified;
       state.sourceImage = rectified;
@@ -453,20 +499,6 @@ async function processHiResFile(file) {
     alert('Fehler beim Verarbeiten: ' + (e.message || e));
     capture.busy = false;
   }
-}
-
-function loadImageFromFile(file) {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = (e) => {
-      const img = new Image();
-      img.onload = () => resolve(img);
-      img.onerror = () => reject(new Error('image decode failed'));
-      img.src = e.target.result;
-    };
-    reader.onerror = () => reject(new Error('file read failed'));
-    reader.readAsDataURL(file);
-  });
 }
 
 function flashSideTransition() {
