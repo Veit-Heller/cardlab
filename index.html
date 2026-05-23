@@ -82,7 +82,7 @@
 
         <!-- Instruction text -->
         <div class="scan-instruction" id="scanInstruction">
-          Vorderseite vor die Kamera halten
+          Vorderseite ins Bild halten
         </div>
 
         <!-- Side-transition overlay: shown for ~1.8s between front and back capture -->
@@ -90,33 +90,14 @@
           <div class="side-transition-inner">
             <div class="st-step">Vorderseite ✓</div>
             <div class="st-action">Karte umdrehen</div>
-            <div class="st-hint">jetzt Rückseite scannen</div>
+            <div class="st-hint">jetzt Rückseite fotografieren</div>
           </div>
         </div>
 
-        <!-- Pose progress: 5 dots representing center + 4 tilt directions -->
-        <div class="pose-hud">
-          <div class="pose-row">
-            <div class="pose-dot" data-pose="up" title="Obere Kante zur Kamera"></div>
-          </div>
-          <div class="pose-row">
-            <div class="pose-dot" data-pose="left" title="Linke Seite zur Kamera"></div>
-            <div class="pose-dot" data-pose="center" title="Gerade halten"></div>
-            <div class="pose-dot" data-pose="right" title="Rechte Seite zur Kamera"></div>
-          </div>
-          <div class="pose-row">
-            <div class="pose-dot" data-pose="down" title="Untere Kante zur Kamera"></div>
-          </div>
-          <div class="pose-count" id="poseCount">0/5</div>
-        </div>
-
-        <!-- Capture progress ring -->
-        <div class="capture-ring" id="captureRing">
-          <svg viewBox="0 0 100 100">
-            <circle cx="50" cy="50" r="46" class="ring-bg"></circle>
-            <circle cx="50" cy="50" r="46" class="ring-fill" id="ringFill"></circle>
-          </svg>
-        </div>
+        <!-- Big capture button — taps open native camera UI (high-res) -->
+        <button class="capture-btn" id="btnCaptureCard" disabled>
+          📸 Vorderseite fotografieren
+        </button>
 
         <!-- Bottom controls -->
         <div class="scan-controls">
@@ -218,16 +199,9 @@
 
       <div class="holo-flip" id="holoFlip">
         <div class="holo-card float" id="holoCard">
-          <!-- WebGL canvases: tilt-interpolated stack of 5 captured textures per side.
-               These replace the static background-image divs when multi-view data is
-               available; fall back to the legacy div-with-background-image below. -->
-          <canvas class="layer card-img card-img-front" id="holoFrontCanvas"></canvas>
-          <canvas class="layer card-img card-img-back" id="holoBackCanvas"></canvas>
-          <!-- Legacy fallback layers: only used if the user came in via the
-               single-shot/demo path with no multi-view data. -->
-          <div class="layer card-img card-img-front legacy" id="holoCardImgFront" hidden></div>
-          <div class="layer card-img card-img-back legacy" id="holoCardImgBack" hidden></div>
-          <!-- CSS pseudo-holo: hidden when multi-view WebGL renderer is active. -->
+          <div class="layer card-img card-img-front" id="holoCardImgFront"></div>
+          <div class="layer card-img card-img-back" id="holoCardImgBack"></div>
+          <!-- CSS pseudo-holo overlay layers for the tilt shimmer effect -->
           <div class="layer holo-pattern" id="holoPattern"></div>
           <div class="layer holo-rainbow" id="holoRainbow"></div>
           <div class="layer holo-sparkle" id="holoSparkle"></div>
