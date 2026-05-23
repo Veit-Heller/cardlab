@@ -1,6 +1,11 @@
 // OpenCV runs here in a Web Worker so its WASM compile and per-frame
 // edge/contour pipeline don't block the main thread. We accept ImageData
 // (RGBA bytes + dimensions) and return either a detected quad or null.
+//
+// The detector runs multiple parameter passes (adaptive Canny based on the
+// image's own brightness, plus a couple of fixed fallbacks for unusual
+// lighting) and accepts contours of 4–6 vertices via convex-hull cleanup —
+// so a finger on a corner doesn't kill the entire frame.
 
 self.Module = {
   onRuntimeInitialized() {
@@ -27,35 +32,29 @@ function orderQuadCorners(pts) {
   return [tl, tr, br, bl];
 }
 
-function detectQuad(rgba, w, h, opts = {}) {
+// One detection attempt with a specific parameter set. Returns a quad
+// {tl,tr,br,bl} or null. Also tries a convex-hull cleanup so contours
+// with a finger on a corner (5–6 vertices) can still snap to 4.
+function detectQuadOnce(gray, w, h, opts) {
   const cv = self.cv;
-  if (!cv || !cv.imread) return null;
+  const {
+    cannyLow, cannyHigh,
+    minAreaRatio = 0.05,
+    maxAreaRatio = 0.97,
+    approxEpsilon = 0.04,
+    minAspectRatio = 0.4,
+    maxAspectRatio = 0.95,
+    dilateIters = 1,
+  } = opts;
 
-  // Looser defaults than the original: real-world phone shots have busy
-  // backgrounds, partial-finger occlusion, and varying lighting, so we'd
-  // rather over-match a bit than reject every frame with a hand in it.
-  const minAreaRatio = opts.minAreaRatio ?? 0.05;
-  const maxAreaRatio = opts.maxAreaRatio ?? 0.97;
-  const cannyLow = opts.cannyLow ?? 40;
-  const cannyHigh = opts.cannyHigh ?? 120;
-  const approxEpsilon = opts.approxEpsilon ?? 0.04; // higher tolerance on "4 corners exactly"
-  const minAspectRatio = opts.minAspectRatio ?? 0.4;
-  const maxAspectRatio = opts.maxAspectRatio ?? 0.95;
-
-  let src, gray, blurred, edges, kernel, hierarchy, contours;
+  let blurred, edges, kernel, hierarchy, contours;
   try {
-    // Construct the Mat directly from the typed array. cv.matFromImageData
-    // is fussy about the wrapper object shape, this is the safer path.
-    src = new cv.Mat(h, w, cv.CV_8UC4);
-    src.data.set(rgba);
-    gray = new cv.Mat();
-    cv.cvtColor(src, gray, cv.COLOR_RGBA2GRAY);
     blurred = new cv.Mat();
     cv.GaussianBlur(gray, blurred, new cv.Size(5, 5), 0);
     edges = new cv.Mat();
     cv.Canny(blurred, edges, cannyLow, cannyHigh);
     kernel = cv.Mat.ones(3, 3, cv.CV_8U);
-    cv.dilate(edges, edges, kernel);
+    for (let k = 0; k < dilateIters; k++) cv.dilate(edges, edges, kernel);
 
     contours = new cv.MatVector();
     hierarchy = new cv.Mat();
@@ -73,12 +72,38 @@ function detectQuad(rgba, w, h, opts = {}) {
         continue;
       }
       const peri = cv.arcLength(cnt, true);
+
+      // Approximate to a polygon. Try the literal contour first; if it has
+      // more than 4 vertices, fall back to its convex hull (handles a finger
+      // pinching off a corner).
       const approx = new cv.Mat();
       cv.approxPolyDP(cnt, approx, peri * approxEpsilon, true);
-      if (approx.rows === 4 && cv.isContourConvex(approx) && area > bestArea) {
+
+      let candidateApprox = null;
+      if (approx.rows === 4 && cv.isContourConvex(approx)) {
+        candidateApprox = approx;
+      } else if (approx.rows >= 4 && approx.rows <= 8) {
+        // Try convex hull → re-approx with looser epsilon
+        const hull = new cv.Mat();
+        cv.convexHull(cnt, hull, false, true);
+        const hullApprox = new cv.Mat();
+        cv.approxPolyDP(hull, hullApprox, peri * 0.06, true);
+        if (hullApprox.rows === 4 && cv.isContourConvex(hullApprox)) {
+          candidateApprox = hullApprox;
+          approx.delete();
+        } else {
+          hullApprox.delete();
+          approx.delete();
+        }
+        hull.delete();
+      } else {
+        approx.delete();
+      }
+
+      if (candidateApprox && area > bestArea) {
         const pts = [];
         for (let r = 0; r < 4; r++) {
-          pts.push({ x: approx.data32S[r * 2], y: approx.data32S[r * 2 + 1] });
+          pts.push({ x: candidateApprox.data32S[r * 2], y: candidateApprox.data32S[r * 2 + 1] });
         }
         const ordered = orderQuadCorners(pts);
         const wq = (dist(ordered[0], ordered[1]) + dist(ordered[3], ordered[2])) / 2;
@@ -88,23 +113,65 @@ function detectQuad(rgba, w, h, opts = {}) {
           bestArea = area;
           bestQuad = ordered;
         }
+        candidateApprox.delete();
       }
-      approx.delete();
       cnt.delete();
     }
     return bestQuad;
-  } catch (e) {
-    // Surface errors back to the main thread so we can diagnose silent failures
-    self.postMessage({ type: 'detect-error', message: String(e && (e.message || e)) });
-    return null;
   } finally {
-    if (src) src.delete();
-    if (gray) gray.delete();
     if (blurred) blurred.delete();
     if (edges) edges.delete();
     if (kernel) kernel.delete();
     if (hierarchy) hierarchy.delete();
     if (contours) contours.delete();
+  }
+}
+
+// Computes per-image Canny thresholds based on the grayscale's mean
+// brightness. Works far better than fixed numbers across lighting setups.
+function adaptiveCannyThresholds(gray) {
+  const cv = self.cv;
+  const m = cv.mean(gray);
+  const meanVal = m[0]; // 0..255
+  const sigma = 0.33;
+  const low = Math.max(10,  Math.round((1 - sigma) * meanVal));
+  const high = Math.min(255, Math.round((1 + sigma) * meanVal));
+  return { low, high };
+}
+
+// Multi-pass detection: adaptive first, then conservative fallbacks for
+// unusual lighting. First pass that yields a valid quad wins.
+function detectQuad(rgba, w, h, _opts = {}) {
+  const cv = self.cv;
+  if (!cv || !cv.imread) return null;
+
+  let src, gray;
+  try {
+    src = new cv.Mat(h, w, cv.CV_8UC4);
+    src.data.set(rgba);
+    gray = new cv.Mat();
+    cv.cvtColor(src, gray, cv.COLOR_RGBA2GRAY);
+
+    const adaptive = adaptiveCannyThresholds(gray);
+    const passes = [
+      // 1. Adaptive: tracks the actual brightness of the current frame
+      { cannyLow: adaptive.low, cannyHigh: adaptive.high, dilateIters: 1 },
+      // 2. Low-contrast / dim lighting fallback
+      { cannyLow: 20, cannyHigh: 60, dilateIters: 2 },
+      // 3. High-contrast / very bright fallback
+      { cannyLow: 80, cannyHigh: 200, dilateIters: 1 },
+    ];
+    for (const opts of passes) {
+      const q = detectQuadOnce(gray, w, h, opts);
+      if (q) return q;
+    }
+    return null;
+  } catch (e) {
+    self.postMessage({ type: 'detect-error', message: String(e && (e.message || e)) });
+    return null;
+  } finally {
+    if (src) src.delete();
+    if (gray) gray.delete();
   }
 }
 
