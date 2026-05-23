@@ -42,6 +42,9 @@ function setupCvWorker() {
     } else if (m.type === 'detect-result') {
       scanner.cvBusy = false;
       onCvDetectResult(m.id, m.quad);
+    } else if (m.type === 'detect-error') {
+      scanner.cvBusy = false;
+      console.warn('[cv-worker] detect error:', m.message);
     }
   };
   cvWorker.onerror = (e) => {

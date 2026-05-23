@@ -41,7 +41,10 @@ function detectQuad(rgba, w, h, opts = {}) {
 
   let src, gray, blurred, edges, kernel, hierarchy, contours;
   try {
-    src = cv.matFromImageData({ data: rgba, width: w, height: h });
+    // Construct the Mat directly from the typed array. cv.matFromImageData
+    // is fussy about the wrapper object shape, this is the safer path.
+    src = new cv.Mat(h, w, cv.CV_8UC4);
+    src.data.set(rgba);
     gray = new cv.Mat();
     cv.cvtColor(src, gray, cv.COLOR_RGBA2GRAY);
     blurred = new cv.Mat();
@@ -88,6 +91,8 @@ function detectQuad(rgba, w, h, opts = {}) {
     }
     return bestQuad;
   } catch (e) {
+    // Surface errors back to the main thread so we can diagnose silent failures
+    self.postMessage({ type: 'detect-error', message: String(e && (e.message || e)) });
     return null;
   } finally {
     if (src) src.delete();
