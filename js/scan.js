@@ -106,27 +106,57 @@ function isQualityGood() {
 }
 
 // If the current frame is good and improves over what we have for this pose, store it.
+// Wrapped in try/catch — any exception here used to kill the rAF loop entirely,
+// freezing the whole scan UI.
 function maybeRecordPoseFrame() {
   if (captureState.finished) return;
   if (!isQualityGood()) return;
-  const pose = classifyPose(scanner.lastQuality.quad);
-  if (!pose) return;
-  const slot = captureState.perPose[pose];
-  const sharp = scanner.lastQuality.sharpness;
-  if (slot && slot.sharpness >= sharp) return; // not better
-  // Snap full-resolution video frame
-  const c = document.createElement('canvas');
-  c.width = scanVideo.videoWidth;
-  c.height = scanVideo.videoHeight;
-  c.getContext('2d').drawImage(scanVideo, 0, 0);
-  // Map detected quad (detect-canvas coords) into image coords
-  const qs = scanner.lastQuality.quadScale;
-  const imgQuad = scanner.lastQuality.quad.map(p => ({ x: p.x * qs, y: p.y * qs }));
-  captureState.perPose[pose] = { sharpness: sharp, frame: c, imgQuad };
-  updatePoseUI();
-  if (POSES.every(p => captureState.perPose[p])) {
-    finalizeMultiAngle();
+  try {
+    const pose = classifyPose(scanner.lastQuality.quad);
+    if (!pose) return;
+    const slot = captureState.perPose[pose];
+    const sharp = scanner.lastQuality.sharpness;
+    if (slot && slot.sharpness >= sharp) return; // not better
+    // Cap captured frame to ~1280px on the long side so 5 of them don't blow
+    // through phone memory (full-HD × 5 = ~40MB of RGBA pixels).
+    const MAX_DIM = 1280;
+    const vw = scanVideo.videoWidth, vh = scanVideo.videoHeight;
+    const s = Math.min(1, MAX_DIM / Math.max(vw, vh));
+    const cw = Math.round(vw * s), ch = Math.round(vh * s);
+    const c = document.createElement('canvas');
+    c.width = cw;
+    c.height = ch;
+    c.getContext('2d').drawImage(scanVideo, 0, 0, cw, ch);
+    // Quad → capture-canvas coords: detect → video (× quadScale) → capture (× s)
+    const qs = scanner.lastQuality.quadScale * s;
+    const imgQuad = scanner.lastQuality.quad.map(p => ({ x: p.x * qs, y: p.y * qs }));
+    captureState.perPose[pose] = { sharpness: sharp, frame: c, imgQuad };
+    updatePoseUI();
+    if (POSES.every(p => captureState.perPose[p])) {
+      finalizeMultiAngle();
+    }
+  } catch (e) {
+    setDebug('capture-err: ' + (e.message || e));
+    console.warn('[capture]', e);
   }
+}
+
+// ─────── On-screen debug strip ───────
+// Small overlay so the user (and we) can see what the scanner is doing
+// when something silently fails.
+let lastDebugErr = '';
+function setDebug(msg) {
+  lastDebugErr = msg;
+}
+function updateDebug() {
+  const el = document.getElementById('scanDebug');
+  if (!el) return;
+  const q = scanner.lastQuality;
+  const pose = q.quad ? classifyPose(q.quad) : '–';
+  el.textContent =
+    `pose:${pose}  sharp:${(q.sharpness||0).toFixed(0)}  ` +
+    `frame:${(q.frame||0).toFixed(2)}  detect:${q.detect}` +
+    (lastDebugErr ? `\n${lastDebugErr}` : '');
 }
 
 function finalizeMultiAngle() {
@@ -212,22 +242,25 @@ function stopScan(skipUI = false) {
 
 function loop() {
   if (!scanner.running) return;
-  const now = performance.now();
-  const dt = now - scanner.lastFrameTime;
-  scanner.lastFrameTime = now;
+  try {
+    const now = performance.now();
+    const dt = now - scanner.lastFrameTime;
+    scanner.lastFrameTime = now;
 
-  // Only run detection at the throttled rate
-  if (now - scanner.lastDetectAt > scanner.detectInterval) {
-    scanner.lastDetectAt = now;
-    runDetectionStep();
+    if (now - scanner.lastDetectAt > scanner.detectInterval) {
+      scanner.lastDetectAt = now;
+      runDetectionStep();
+    }
+
+    drawScanOverlay();
+    updateAutoCapture(dt);
+    updateDebug();
+  } catch (e) {
+    setDebug('loop-err: ' + (e.message || e));
+    console.error('[scan loop]', e);
   }
-
-  // Draw the overlay every frame (smooth quad rendering)
-  drawScanOverlay();
-
-  // Update auto-capture progress
-  updateAutoCapture(dt);
-
+  // Always re-arm the next frame, even if this one threw, so a transient
+  // error doesn't kill the entire scan UI.
   scanner.rafId = requestAnimationFrame(loop);
 }
 

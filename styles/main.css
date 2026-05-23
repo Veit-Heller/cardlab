@@ -365,6 +365,26 @@ main {
   border-color: rgba(95,220,140,0.4);
 }
 
+/* Debug strip — small live readout, top-right of the scanner */
+.scan-debug {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  z-index: 7;
+  padding: 6px 8px;
+  background: rgba(7,7,10,0.75);
+  color: var(--cyan);
+  font-family: var(--mono);
+  font-size: 9px;
+  line-height: 1.4;
+  letter-spacing: 0.04em;
+  white-space: pre-wrap;
+  border-radius: 6px;
+  border: 1px solid rgba(106,255,227,0.18);
+  max-width: 50%;
+  pointer-events: none;
+}
+
 /* Pose progress HUD (5 dots: center + 4 tilt directions in a plus layout) */
 .pose-hud {
   position: absolute;
