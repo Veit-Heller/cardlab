@@ -53,51 +53,90 @@ function setupCvWorker() {
   };
 }
 
-// ─────── Two-stage capture: Front side, then Back side ───────
-// Each stage runs the live scan until we've buffered enough consecutive
-// good-quality frames. We then snap the sharpest of them, rectify it at
-// high resolution, move on to the back side, and finally hand off to
-// analysis + showcase. The card ends up as two clean canvases with
-// background fully eliminated by perspective rectification.
+// ─────── Multi-view Front+Back capture ───────
+// Per side we collect 5 textures at different tilt poses (center + 4 tilts).
+// The same pixel coordinates align across all 5 (because each is rectified to
+// the same 1500×2100 raster from its own quad). That stack feeds the WebGL
+// holo renderer in the showcase, which interpolates between them based on the
+// user's current viewing angle — so the card's actual hologram behaviour
+// (not a CSS pseudo-effect) is reproduced digitally.
 
-const CARD_OUT_W = 1500;          // ~600dpi for a 2.5″ wide card
-const CARD_OUT_H = 2100;          // ~600dpi for a 3.5″ tall card
-const GOOD_FRAMES_NEEDED = 5;     // consecutive good frames before snap — one per HUD dot
+const CARD_OUT_W = 1500;
+const CARD_OUT_H = 2100;
+const GOOD_FRAMES_NEEDED = 5;            // good frames buffered per pose before snap
+const POSE_SEQUENCE = ['center', 'left', 'right', 'up', 'down'];
+const POSE_GUIDANCE = {
+  center: 'gerade vor die Kamera halten',
+  left:   'nach links neigen · linke Seite näher',
+  right:  'nach rechts neigen · rechte Seite näher',
+  up:     'oben nach hinten · obere Kante weg',
+  down:   'oben nach vorn · obere Kante näher',
+};
 const SIDE_LABEL = { front: 'Vorderseite', back: 'Rückseite' };
 
 const capture = {
   side: 'front',
+  poseIdx: 0,           // index into POSE_SEQUENCE
   finished: false,
-  goodBuffer: [], // {sharpness, frame: Canvas, imgQuad}
-  results: { front: null, back: null },
+  goodBuffer: [],       // {sharpness, frame: Canvas, imgQuad} for current pose
+  results: {
+    front: { center: null, left: null, right: null, up: null, down: null },
+    back:  { center: null, left: null, right: null, up: null, down: null },
+  },
 };
+
+function currentPose() { return POSE_SEQUENCE[capture.poseIdx]; }
 
 function resetCapture() {
   capture.side = 'front';
+  capture.poseIdx = 0;
   capture.finished = false;
   capture.goodBuffer.length = 0;
-  capture.results = { front: null, back: null };
+  capture.results = {
+    front: { center: null, left: null, right: null, up: null, down: null },
+    back:  { center: null, left: null, right: null, up: null, down: null },
+  };
 }
 resetCapture();
 
-// Quality gate for buffering a frame: quad detected + decent light + reasonable framing.
-// Sharpness is not gated — used inside the buffer to pick the sharpest.
+// Classify the pose by comparing edge lengths of the detected quad.
+// Returns 'center' | 'left' | 'right' | 'up' | 'down' | null.
+function classifyPose(quad) {
+  if (!quad) return null;
+  const lh = dist(quad[0], quad[3]);
+  const rh = dist(quad[1], quad[2]);
+  const tw = dist(quad[0], quad[1]);
+  const bw = dist(quad[3], quad[2]);
+  const tx = (lh - rh) / (lh + rh); // +: left edge longer → left side closer
+  const ty = (bw - tw) / (bw + tw); // +: bottom edge longer → bottom closer
+  const T_CENTER = 0.035;
+  if (Math.abs(tx) < T_CENTER && Math.abs(ty) < T_CENTER) return 'center';
+  if (Math.abs(tx) > Math.abs(ty)) return tx > 0 ? 'left' : 'right';
+  return ty > 0 ? 'down' : 'up';
+}
+
+// Quality gate.
 function isQualityGood() {
   const q = scanner.lastQuality;
   return q.detect >= 0.99 && q.light >= 0.30 && q.frame >= 0.50;
 }
 
-// Called every rAF: buffer good frames, snap when we've seen enough in a row.
-// A bad frame resets the buffer so wobble + steady shots don't mix.
+// Per rAF: if the user is in the target pose with good quality, buffer the frame.
+// When enough good frames are buffered for the current pose, snap the sharpest.
 function maybeBufferFrame() {
   if (capture.finished) return;
   if (!isQualityGood()) {
     if (capture.goodBuffer.length > 0) capture.goodBuffer.length = 0;
     return;
   }
+  const detected = classifyPose(scanner.lastQuality.quad);
+  const target = currentPose();
+  if (detected !== target) {
+    // Wrong pose — don't buffer, but don't clear either; transient mismatches
+    // during rotation are normal. Buffer naturally drains via the quality gate.
+    return;
+  }
   try {
-    // Source-side cap: 1920px long side keeps the rectifier well-fed for ~600dpi
-    // output without holding 8 × full-HD canvases in memory.
     const MAX_DIM = 1920;
     const vw = scanVideo.videoWidth, vh = scanVideo.videoHeight;
     const s = Math.min(1, MAX_DIM / Math.max(vw, vh));
@@ -114,7 +153,7 @@ function maybeBufferFrame() {
       imgQuad,
     });
     if (capture.goodBuffer.length >= GOOD_FRAMES_NEEDED) {
-      finalizeSide();
+      finalizePose();
     }
   } catch (e) {
     setDebug('buffer-err: ' + (e.message || e));
@@ -122,20 +161,31 @@ function maybeBufferFrame() {
   }
 }
 
-// Pick the sharpest buffered frame for the current side, rectify it, advance.
-function finalizeSide() {
+// Snap sharpest buffered frame for the current pose, advance to the next pose
+// (or to the back side, or to analysis).
+function finalizePose() {
   capture.goodBuffer.sort((a, b) => b.sharpness - a.sharpness);
   const best = capture.goodBuffer[0];
   const rectified = rectifyFromImageCorners(best.frame, best.imgQuad, CARD_OUT_W, CARD_OUT_H);
-  capture.results[capture.side] = { canvas: rectified, imgQuad: best.imgQuad };
+  capture.results[capture.side][currentPose()] = rectified;
   capture.goodBuffer.length = 0;
 
+  capture.poseIdx++;
+  if (capture.poseIdx >= POSE_SEQUENCE.length) {
+    finalizeSide();
+  }
+}
+
+function finalizeSide() {
   if (capture.side === 'front') {
-    state.frontCard = rectified;
+    state.frontFrames = capture.results.front;
+    state.frontCard = state.frontFrames.center; // back-compat for analysis + showcase fallback
     capture.side = 'back';
+    capture.poseIdx = 0;
     flashSideTransition();
   } else {
-    state.backCard = rectified;
+    state.backFrames = capture.results.back;
+    state.backCard = state.backFrames.center;
     finalizeAll();
   }
 }
@@ -143,8 +193,7 @@ function finalizeSide() {
 function finalizeAll() {
   if (capture.finished) return;
   capture.finished = true;
-  // Back-compat with the analysis screen
-  state.sourceImage = capture.results.front.canvas;
+  state.sourceImage = state.frontCard;
   state.rectifiedCanvas = state.frontCard;
   stopScan(true);
   unlockScreen('analysis');
@@ -173,10 +222,12 @@ function updateDebug() {
   const el = document.getElementById('scanDebug');
   if (!el) return;
   const q = scanner.lastQuality;
+  const detected = q.quad ? classifyPose(q.quad) : '–';
   el.textContent =
-    `side:${capture.side}  buffer:${capture.goodBuffer.length}/${GOOD_FRAMES_NEEDED}\n` +
-    `sharp:${(q.sharpness||0).toFixed(0)}  frame:${(q.frame||0).toFixed(2)}  ` +
-    `light:${(q.light||0).toFixed(2)}  detect:${q.detect}` +
+    `${capture.side} · pose:${currentPose()} (see:${detected}) ` +
+    `buf:${capture.goodBuffer.length}/${GOOD_FRAMES_NEEDED}\n` +
+    `sharp:${(q.sharpness||0).toFixed(0)} frame:${(q.frame||0).toFixed(2)} ` +
+    `light:${(q.light||0).toFixed(2)} detect:${q.detect}` +
     (lastDebugErr ? `\n${lastDebugErr}` : '');
 }
 
@@ -566,18 +617,20 @@ function updateHUD() {
   updateCaptureProgressUI();
 }
 
-// Pose-dots are now repurposed as a capture-progress meter: one dot per
-// buffered good frame, on the way to GOOD_FRAMES_NEEDED.
+// Pose dots now indicate per-pose capture progress for the current side:
+// dot.captured = pose already snapped, dot.current = pose we're collecting now.
 function updateCaptureProgressUI() {
-  const dots = document.querySelectorAll('.pose-dot');
-  const filled = capture.goodBuffer.length;
-  dots.forEach((dot, i) => {
-    dot.classList.toggle('captured', i < filled);
-    dot.classList.toggle('current', i === filled && filled < GOOD_FRAMES_NEEDED);
+  const completed = capture.results[capture.side];
+  const target = currentPose();
+  document.querySelectorAll('.pose-dot').forEach(dot => {
+    const p = dot.dataset.pose;
+    dot.classList.toggle('captured', !!completed[p]);
+    dot.classList.toggle('current', p === target);
   });
   const badge = document.getElementById('poseCount');
   if (badge) {
-    badge.textContent = `${SIDE_LABEL[capture.side]} · ${filled}/${GOOD_FRAMES_NEEDED}`;
+    badge.textContent =
+      `${SIDE_LABEL[capture.side]} · Pose ${capture.poseIdx + 1}/${POSE_SEQUENCE.length}`;
   }
 }
 
@@ -585,6 +638,7 @@ function updateInstruction() {
   const q = scanner.lastQuality;
   let msg, good = false;
   const sideLabel = SIDE_LABEL[capture.side];
+  const target = currentPose();
 
   if (!cvWorkerReady) {
     msg = 'Initialisiere Detektor…';
@@ -597,8 +651,13 @@ function updateInstruction() {
     else if (q.coverage > 0.85) msg = 'Etwas weiter weg';
     else msg = 'Karte mittig halten';
   } else {
-    msg = `${sideLabel} · ruhig halten…`;
-    good = true;
+    const detected = classifyPose(q.quad);
+    if (detected === target) {
+      msg = `${sideLabel} · ${POSE_GUIDANCE[target]} · ruhig halten`;
+      good = true;
+    } else {
+      msg = `Jetzt ${POSE_GUIDANCE[target]}`;
+    }
   }
   scanInstruction.textContent = msg;
   scanInstruction.classList.toggle('good', good);

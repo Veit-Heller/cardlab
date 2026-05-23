@@ -7,9 +7,13 @@ const state = {
   corners: null,
   rectifiedCanvas: null,    // alias for frontCard, kept for back-compat with analysis.js
 
-  // New: full card digitisation. Both are 1500×2100 canvases of the rectified card
-  // with background removed (only the card's own pixels). Set by scan.js after the
-  // Front+Back capture flow.
+  // Full card digitisation: per-side multi-view frames keyed by tilt pose.
+  // Each entry is a 1500×2100 canvas of the rectified card with background
+  // removed. The same pixel coordinates align across all 5 frames per side,
+  // so the showcase can sample them as a tilt-dependent texture stack.
+  frontFrames: null,        // { center, left, right, up, down } | null
+  backFrames:  null,
+  // Convenience aliases (= the .center frame) for analysis + back-compat.
   frontCard: null,
   backCard: null,
 

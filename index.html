@@ -218,8 +218,16 @@
 
       <div class="holo-flip" id="holoFlip">
         <div class="holo-card float" id="holoCard">
-          <div class="layer card-img card-img-front" id="holoCardImgFront"></div>
-          <div class="layer card-img card-img-back" id="holoCardImgBack"></div>
+          <!-- WebGL canvases: tilt-interpolated stack of 5 captured textures per side.
+               These replace the static background-image divs when multi-view data is
+               available; fall back to the legacy div-with-background-image below. -->
+          <canvas class="layer card-img card-img-front" id="holoFrontCanvas"></canvas>
+          <canvas class="layer card-img card-img-back" id="holoBackCanvas"></canvas>
+          <!-- Legacy fallback layers: only used if the user came in via the
+               single-shot/demo path with no multi-view data. -->
+          <div class="layer card-img card-img-front legacy" id="holoCardImgFront" hidden></div>
+          <div class="layer card-img card-img-back legacy" id="holoCardImgBack" hidden></div>
+          <!-- CSS pseudo-holo: hidden when multi-view WebGL renderer is active. -->
           <div class="layer holo-pattern" id="holoPattern"></div>
           <div class="layer holo-rainbow" id="holoRainbow"></div>
           <div class="layer holo-sparkle" id="holoSparkle"></div>

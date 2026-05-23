@@ -1,9 +1,12 @@
 // SCREEN 4: HOLO SHOWCASE
-// 3D tilt + animated holographic foil effects driven by mouse / device gyro.
-// The card is a flippable 3D object — front and back are separate textures.
+// 3D-flippable card with a WebGL renderer that interpolates between the
+// 5 captured tilt textures per side, so the card's actual hologram
+// behaviour is reproduced — not a CSS pseudo-effect.
 
 const holoFlip = document.getElementById('holoFlip');
 const holoCard = document.getElementById('holoCard');
+const holoFrontCanvas = document.getElementById('holoFrontCanvas');
+const holoBackCanvas = document.getElementById('holoBackCanvas');
 const holoCardImgFront = document.getElementById('holoCardImgFront');
 const holoCardImgBack = document.getElementById('holoCardImgBack');
 const holoPattern = document.getElementById('holoPattern');
@@ -13,23 +16,175 @@ const holoRainbow = document.getElementById('holoRainbow');
 
 let flipped = false;
 let lastTilt = { mx: 0.5, my: 0.5 };
+let frontRenderer = null;  // { gl, program, textures, render(tilt) }
+let backRenderer  = null;
+
+function framesComplete(frames) {
+  return frames && ['center','left','right','up','down'].every(k => !!frames[k]);
+}
 
 function initShowcase() {
-  // Front: prefer the high-res frontCard captured by the new scan flow,
-  // fall back to the legacy rectifiedCanvas (single-shot / demo path).
-  const frontSrc = state.frontCard || state.rectifiedCanvas;
-  if (frontSrc) {
-    holoCardImgFront.style.backgroundImage = `url(${frontSrc.toDataURL('image/png')})`;
-  }
-  if (state.backCard) {
-    holoCardImgBack.style.backgroundImage = `url(${state.backCard.toDataURL('image/png')})`;
-  } else {
-    // No back captured (demo / legacy flow) — show a subtle placeholder
-    holoCardImgBack.style.background =
-      'linear-gradient(135deg, #1a1a1a, #0a0a0a) center/cover no-repeat';
-  }
   flipped = false;
   holoCard.style.setProperty('--flip', '0deg');
+
+  const useMV_front = framesComplete(state.frontFrames);
+  const useMV_back  = framesComplete(state.backFrames);
+
+  // Hide CSS pseudo-holo whenever we have any real multi-view data
+  const realHolo = useMV_front || useMV_back;
+  [holoPattern, holoRainbow, holoSparkle, holoGlare].forEach(el => {
+    el.style.display = realHolo ? 'none' : '';
+  });
+
+  // ── Front face ──
+  if (useMV_front) {
+    holoFrontCanvas.hidden = false;
+    holoCardImgFront.hidden = true;
+    frontRenderer = createMultiViewRenderer(holoFrontCanvas, state.frontFrames);
+    frontRenderer.render(0, 0);
+  } else {
+    holoFrontCanvas.hidden = true;
+    holoCardImgFront.hidden = false;
+    const src = state.frontCard || state.rectifiedCanvas;
+    if (src) holoCardImgFront.style.backgroundImage = `url(${src.toDataURL('image/png')})`;
+  }
+
+  // ── Back face ──
+  if (useMV_back) {
+    holoBackCanvas.hidden = false;
+    holoCardImgBack.hidden = true;
+    backRenderer = createMultiViewRenderer(holoBackCanvas, state.backFrames);
+    backRenderer.render(0, 0);
+  } else {
+    holoBackCanvas.hidden = true;
+    holoCardImgBack.hidden = false;
+    if (state.backCard) {
+      holoCardImgBack.style.backgroundImage = `url(${state.backCard.toDataURL('image/png')})`;
+    } else {
+      holoCardImgBack.style.background =
+        'linear-gradient(135deg, #1a1a1a, #0a0a0a) center/cover no-repeat';
+    }
+  }
+}
+
+// ─────── Multi-view WebGL renderer ───────
+// Uploads 5 textures (center + left/right/up/down) and a fragment shader that
+// blends them weighted by the current tilt vector. Result: as the user moves
+// their pointer / tilts their phone, the card surface shows the actual color
+// it had at that viewing angle during capture — including real holo shimmer.
+const VERT_SRC = `
+  attribute vec2 a_pos;
+  attribute vec2 a_uv;
+  varying vec2 v_uv;
+  void main() {
+    v_uv = a_uv;
+    gl_Position = vec4(a_pos, 0.0, 1.0);
+  }
+`;
+const FRAG_SRC = `
+  precision highp float;
+  uniform sampler2D u_center;
+  uniform sampler2D u_left;
+  uniform sampler2D u_right;
+  uniform sampler2D u_up;
+  uniform sampler2D u_down;
+  uniform vec2 u_tilt; // x,y in roughly -1..+1
+  varying vec2 v_uv;
+  void main() {
+    vec4 c = texture2D(u_center, v_uv);
+    vec4 l = texture2D(u_left,   v_uv);
+    vec4 r = texture2D(u_right,  v_uv);
+    vec4 u = texture2D(u_up,     v_uv);
+    vec4 d = texture2D(u_down,   v_uv);
+    float tx = clamp(u_tilt.x, -1.0, 1.0);
+    float ty = clamp(u_tilt.y, -1.0, 1.0);
+    // Triangle weights so the 5 textures form a partition of unity on the
+    // (tx,ty) square in [-1,1]^2 — center owns the middle, the four tilt
+    // captures own their respective edges.
+    float wL = max(0.0, -tx);
+    float wR = max(0.0,  tx);
+    float wU = max(0.0, -ty);
+    float wD = max(0.0,  ty);
+    float wC = max(0.0, 1.0 - abs(tx) - abs(ty));
+    float total = wC + wL + wR + wU + wD;
+    if (total < 1e-4) { gl_FragColor = c; return; }
+    gl_FragColor = (c * wC + l * wL + r * wR + u * wU + d * wD) / total;
+  }
+`;
+
+function createMultiViewRenderer(canvas, frames) {
+  canvas.width = frames.center.width;
+  canvas.height = frames.center.height;
+  const gl = canvas.getContext('webgl') || canvas.getContext('experimental-webgl');
+  if (!gl) {
+    console.warn('[showcase] WebGL not available, falling back to center frame only');
+    const ctx2d = canvas.getContext('2d');
+    ctx2d.drawImage(frames.center, 0, 0);
+    return { render() {} };
+  }
+
+  // Compile + link
+  function compile(type, src) {
+    const sh = gl.createShader(type);
+    gl.shaderSource(sh, src);
+    gl.compileShader(sh);
+    if (!gl.getShaderParameter(sh, gl.COMPILE_STATUS)) {
+      console.warn('shader error:', gl.getShaderInfoLog(sh));
+    }
+    return sh;
+  }
+  const prog = gl.createProgram();
+  gl.attachShader(prog, compile(gl.VERTEX_SHADER, VERT_SRC));
+  gl.attachShader(prog, compile(gl.FRAGMENT_SHADER, FRAG_SRC));
+  gl.linkProgram(prog);
+  if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) {
+    console.warn('link error:', gl.getProgramInfoLog(prog));
+  }
+  gl.useProgram(prog);
+
+  // Full-screen quad. Flip Y on the UV side so the canvas isn't upside-down.
+  const buf = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+  gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([
+    // x,    y,    u,   v
+    -1, -1,   0, 1,
+     1, -1,   1, 1,
+    -1,  1,   0, 0,
+     1,  1,   1, 0,
+  ]), gl.STATIC_DRAW);
+  const aPos = gl.getAttribLocation(prog, 'a_pos');
+  const aUv  = gl.getAttribLocation(prog, 'a_uv');
+  gl.enableVertexAttribArray(aPos);
+  gl.vertexAttribPointer(aPos, 2, gl.FLOAT, false, 16, 0);
+  gl.enableVertexAttribArray(aUv);
+  gl.vertexAttribPointer(aUv,  2, gl.FLOAT, false, 16, 8);
+
+  // Upload 5 textures
+  function makeTex(source, unit) {
+    gl.activeTexture(gl.TEXTURE0 + unit);
+    const tex = gl.createTexture();
+    gl.bindTexture(gl.TEXTURE_2D, tex);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, source);
+    return tex;
+  }
+  const slots = ['center','left','right','up','down'];
+  slots.forEach((name, i) => {
+    makeTex(frames[name], i);
+    const loc = gl.getUniformLocation(prog, 'u_' + name);
+    gl.uniform1i(loc, i);
+  });
+  const uTilt = gl.getUniformLocation(prog, 'u_tilt');
+
+  function render(tx, ty) {
+    gl.viewport(0, 0, canvas.width, canvas.height);
+    gl.uniform2f(uTilt, tx, ty);
+    gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+  }
+  return { render };
 }
 
 // Mouse / pointer tilt
@@ -43,6 +198,13 @@ function setTilt(mx, my, rect) {
   holoCard.style.setProperty('--ry', ry + 'deg');
   holoCard.style.setProperty('--flip', flipDeg + 'deg');
   holoCard.style.transform = `rotateX(${rx}deg) rotateY(${ry + flipDeg}deg)`;
+
+  // Multi-view holo: ask each WebGL renderer to redraw with the current tilt
+  // as a (-1..+1) vector. mx=0 → left, mx=1 → right (so tx = (mx-0.5)*2).
+  const tx = (mx - 0.5) * 2;
+  const ty = (my - 0.5) * 2;
+  if (frontRenderer) frontRenderer.render(tx, ty);
+  if (backRenderer)  backRenderer.render(tx, ty);
 
   // Move highlight position
   const mxPct = (mx * 100).toFixed(1) + '%';
